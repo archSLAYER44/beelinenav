@@ -290,6 +290,12 @@ final class NavRoute {
 
     double totalM() { return cum[n - 1]; }
 
+    /** Time left at the pace the routing service predicted, seconds. */
+    int remainingTimeS() {
+        double total = totalM();
+        return total <= 0 ? 0 : (int) Math.round(durationS * remaining() / total);
+    }
+
     /** The line from a segment onward as {lat, lon}, thinned evenly to at most maxPoints, for drawing on a map. */
     double[][] outline(int fromSeg, int maxPoints) {
         int count = n - fromSeg, keep = Math.min(count, Math.max(2, maxPoints));

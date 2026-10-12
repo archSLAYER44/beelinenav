@@ -36,6 +36,7 @@ final class Ble {
     private static final UUID SVC = UUID.fromString("7b1e0001-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID ROUTE = UUID.fromString("7b1e0002-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID POSE = UUID.fromString("7b1e0003-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
+    private static final UUID CALL = UUID.fromString("7b1e0004-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final String NAME = "BeelineNav";
     private static final long FAST_SCAN_MS = 30000;   // scan flat out at first, then ease off to save battery
 
@@ -44,10 +45,10 @@ final class Ble {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic routeCh, poseCh;
+    private BluetoothGattCharacteristic routeCh, poseCh, callCh;
     private boolean running, scanning, busy;
     private long busySince, fastUntil;
-    private byte[] pendingRoute, pendingPose;   // only the newest of each is worth sending
+    private byte[] pendingRoute, pendingPose, pendingCall;   // only the newest of each is worth sending
 
     String state = "Starting";
     boolean ready;
@@ -85,24 +86,44 @@ final class Ble {
         pump();
     }
 
-    // Android allows one GATT operation at a time, so writes go out one by one, route first.
+    void sendCall(byte[] packet) {
+        pendingCall = packet;
+        pump();
+    }
+
+    // Android allows one GATT operation at a time, so writes go out one by one: route, then call, then pose.
     private void pump() {
         if (!ready || gatt == null) return;
         long now = SystemClock.elapsedRealtime();
         if (busy && now - busySince < 2000) return;
+        if (pendingCall != null && callCh == null) pendingCall = null;   // old firmware without the call screen
 
-        boolean isRoute = pendingRoute != null;
-        byte[] data = isRoute ? pendingRoute : pendingPose;
-        if (data == null) return;
-        if (isRoute) pendingRoute = null; else pendingPose = null;
-
-        BluetoothGattCharacteristic ch = isRoute ? routeCh : poseCh;
-        ch.setWriteType(isRoute ? BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                : BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+        BluetoothGattCharacteristic ch;
+        byte[] data;
+        if (pendingRoute != null) {
+            ch = routeCh;
+            data = pendingRoute;
+            pendingRoute = null;
+        } else if (pendingCall != null) {
+            ch = callCh;
+            data = pendingCall;
+            pendingCall = null;
+        } else if (pendingPose != null) {
+            ch = poseCh;
+            data = pendingPose;
+            pendingPose = null;
+        } else {
+            return;
+        }
+        ch.setWriteType(ch == poseCh ? BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                : BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
         ch.setValue(data);
         busy = gatt.writeCharacteristic(ch);
         busySince = now;
-        if (!busy && isRoute && pendingRoute == null) pendingRoute = data;   // retry with the next pose
+        if (!busy) {   // write refused: keep the important ones for the next attempt
+            if (ch == routeCh && pendingRoute == null) pendingRoute = data;
+            if (ch == callCh && pendingCall == null) pendingCall = data;
+        }
     }
 
     private void scan() {
@@ -162,7 +183,7 @@ final class Ble {
         g.close();
         if (g != gatt) return;
         gatt = null;
-        routeCh = poseCh = null;
+        routeCh = poseCh = callCh = null;
         ready = busy = false;
         setState("Display disconnected");
         fastUntil = SystemClock.elapsedRealtime() + FAST_SCAN_MS;
@@ -214,6 +235,7 @@ final class Ble {
                 BluetoothGattService svc = g.getService(SVC);
                 routeCh = svc == null ? null : svc.getCharacteristic(ROUTE);
                 poseCh = svc == null ? null : svc.getCharacteristic(POSE);
+                callCh = svc == null ? null : svc.getCharacteristic(CALL);   // absent on older firmware
                 if (routeCh == null || poseCh == null) {
                     g.disconnect();
                     return;

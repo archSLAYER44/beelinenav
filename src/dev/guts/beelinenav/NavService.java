@@ -1,24 +1,35 @@
 package dev.guts.beelinenav;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.database.Cursor;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.ContactsContract;
+import android.telephony.TelephonyManager;
+import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 
 /** Keeps GPS, routing and the display link alive while the screen is off. Everything runs on the main thread. */
 public final class NavService extends Service implements LocationListener, Ble.Listener {
@@ -36,18 +47,24 @@ public final class NavService extends Service implements LocationListener, Ble.L
     boolean hasDest, routing;
     String destName = "", message = "";
     float speed;                       // m/s
+    boolean day;                       // light look right now; goes to the display with every pose
+    int callState;                     // 0 none, 1 ringing, 2 in a call
+    String callName = "";
 
     private double destLat, destLon;
     private float heading;
     private boolean haveHeading;
     private int offCount, sentSeg = -1;
     private long lastRouteRequest, lastGpsMs = -100000;
+    private BroadcastReceiver callRx;
+    private final Handler timer = new Handler(Looper.getMainLooper());
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
         Router.loadKey(this);
+        Theme.load(this);
         goForeground();
         ble = new Ble(this, this);
         ble.start();
@@ -65,10 +82,12 @@ public final class NavService extends Service implements LocationListener, Ble.L
                 message = "Location is not available";
             }
         }
+        timer.post(themeCheck);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        setupCalls();   // the activity may have just been granted the phone permissions
         return START_STICKY;
     }
 
@@ -76,6 +95,8 @@ public final class NavService extends Service implements LocationListener, Ble.L
     public void onDestroy() {
         ((LocationManager) getSystemService(Context.LOCATION_SERVICE)).removeUpdates(this);
         ble.stop();
+        timer.removeCallbacksAndMessages(null);
+        if (callRx != null) unregisterReceiver(callRx);
         instance = null;
         super.onDestroy();
     }
@@ -144,9 +165,10 @@ public final class NavService extends Service implements LocationListener, Ble.L
 
     /** Sends the display its next update from the latest fix. */
     private void tick() {
+        day = Theme.isLight(last);
         NavRoute r = route;
         if (r == null) {
-            ble.sendPose(pose(0, 0, heading, speed, 0, 0));   // display shows a plain speedometer
+            ble.sendPose(pose(0, 0, heading, speed, 0, 0, day));   // display shows a plain speedometer
             return;
         }
         double px = r.toX(last.getLongitude()), py = r.toY(last.getLatitude());
@@ -161,7 +183,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
             ble.sendRoute(r.routePacket());
             sentSeg = r.seg;
         }
-        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle));
+        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day));
 
         offCount = r.offRoute > OFF_ROUTE_M ? offCount + 1 : 0;
         long now = SystemClock.elapsedRealtime();
@@ -189,16 +211,17 @@ public final class NavService extends Service implements LocationListener, Ble.L
         });
     }
 
-    /** Pose packet, 16 bytes LE: int32 x, y (dm), uint16 heading (0.01 deg), speed (cm/s), dist (m), int16 angle. */
-    private static byte[] pose(double x, double y, float heading, float speed, double dist, int angle) {
+    /** Pose packet, 17 bytes LE: int32 x, y (dm), uint16 heading (0.01 deg), speed (cm/s), dist (m), int16 angle, uint8 flags (bit0 = day). */
+    private static byte[] pose(double x, double y, float heading, float speed, double dist, int angle, boolean day) {
         float h = ((heading % 360) + 360) % 360;
-        ByteBuffer b = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer b = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN);
         b.putInt((int) Math.round(x * 10));
         b.putInt((int) Math.round(y * 10));
         b.putShort((short) Math.min(35999, Math.round(h * 100)));
         b.putShort((short) Math.min(65535, Math.round(speed * 100)));
         b.putShort((short) Math.min(65535, Math.round(dist)));
         b.putShort((short) angle);
+        b.put((byte) (day ? 1 : 0));
         return b.array();
     }
 
@@ -212,9 +235,89 @@ public final class NavService extends Service implements LocationListener, Ble.L
     @Override
     public void onBleReady() {
         sentSeg = -1;                                  // the display forgets everything on reconnect
+        if (callState != 0) ble.sendCall(callPacket(callState, callName));
         if (route == null) ble.sendRoute(new byte[]{0});
         if (last != null) tick();
         notifyUi();
+    }
+
+    // ---------- day / night ----------
+
+    private final Runnable themeCheck = new Runnable() {
+        @Override
+        public void run() {
+            boolean d = Theme.isLight(last);
+            if (d != day) {
+                day = d;
+                if (last != null) tick();      // tell the display straight away
+                notifyUi();
+            }
+            timer.postDelayed(this, 60000);
+        }
+    };
+
+    /** Called when the user changes the theme mode in the app. */
+    void refreshTheme() {
+        timer.removeCallbacks(themeCheck);
+        timer.post(themeCheck);
+    }
+
+    // ---------- phone calls ----------
+
+    /** Starts listening for calls once the phone permission exists; without it the feature is simply off. */
+    private void setupCalls() {
+        if (callRx != null
+                || checkSelfPermission(Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return;
+        callRx = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                onCall(i.getStringExtra(TelephonyManager.EXTRA_STATE),
+                        i.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER));
+            }
+        };
+        IntentFilter f = new IntentFilter(TelephonyManager.ACTION_PHONE_STATE_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(callRx, f, Context.RECEIVER_EXPORTED);
+        else registerReceiver(callRx, f);
+    }
+
+    private void onCall(String state, String number) {
+        int s = TelephonyManager.EXTRA_STATE_RINGING.equals(state) ? 1
+                : TelephonyManager.EXTRA_STATE_OFFHOOK.equals(state) ? 2 : 0;
+        String name = callName;
+        if (s == 0) name = "";
+        else if (number != null && !number.isEmpty()) name = lookupName(number);   // only sent with READ_CALL_LOG
+        if (s == callState && name.equals(callName)) return;   // Android repeats the ringing broadcast
+        callState = s;
+        callName = name;
+        Log.i("BeelineNav", "call state " + s + (name.isEmpty() ? "" : " from " + name));
+        ble.sendCall(callPacket(s, name));
+        notifyUi();
+    }
+
+    /** The contact's name for a number, or the number itself. */
+    private String lookupName(String number) {
+        try (Cursor c = getContentResolver().query(
+                Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number)),
+                new String[]{ContactsContract.PhoneLookup.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.isEmpty()) return n;
+            }
+        } catch (RuntimeException ignored) {
+            // no contacts permission, or the lookup failed: show the number
+        }
+        return number;
+    }
+
+    /** Call packet: uint8 state (0 none, 1 ringing, 2 in call), then up to 24 ASCII bytes of the caller's name. */
+    private static byte[] callPacket(int state, String name) {
+        String ascii = name.replaceAll("[^\\x20-\\x7E]", "").trim();   // the display font is ASCII only
+        if (ascii.length() > 24) ascii = ascii.substring(0, 24);
+        byte[] n = ascii.getBytes(StandardCharsets.US_ASCII);
+        byte[] out = new byte[1 + n.length];
+        out[0] = (byte) state;
+        System.arraycopy(n, 0, out, 1, n.length);
+        return out;
     }
 
     private void notifyUi() {

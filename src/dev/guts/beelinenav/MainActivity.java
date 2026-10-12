@@ -10,12 +10,15 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.text.format.DateFormat;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -27,31 +30,32 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Black-and-white control screen: speed, next turn, destination search. */
+/** Control screen: time to arrive, next turn, destination search. Light by day, dark by night. */
 public final class MainActivity extends Activity implements NavService.Listener {
-    private static final int GREY = 0xFF8A8A8A, LINE = 0xFF3A3A3A;
     private static final Pattern LAT_LON =
             Pattern.compile("^\\s*(-?\\d{1,2}(?:\\.\\d+)?)\\s*,\\s*(-?\\d{1,3}(?:\\.\\d+)?)\\s*$");
 
-    private TextView status, speedView, turnView, destView;
+    private TextView status, bigView, bigLabel, subLabel, turnView, destView;
     private EditText input;
     private LinearLayout results;
     private TextView stopBtn, keyBtn, mapBtn;
     private LinearLayout dash, navRow;
     private int panelGen;          // bumped whenever the panel changes, so late replies are dropped
+    private boolean light;
+    private int bg, fg, grey, line;   // colours of the current theme
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        getWindow().setStatusBarColor(Color.BLACK);
-        getWindow().setNavigationBarColor(Color.BLACK);
         Router.loadKey(this);
-        setContentView(buildUi());
+        Theme.load(this);
+        applyTheme();
         askPermissions();
     }
 
@@ -84,6 +88,9 @@ public final class MainActivity extends Activity implements NavService.Listener 
             need.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
         if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS);
+        need.add(Manifest.permission.READ_PHONE_STATE);   // incoming calls on the display; optional
+        need.add(Manifest.permission.READ_CALL_LOG);      // Android 9+ hides the caller's number behind this one
+        need.add(Manifest.permission.READ_CONTACTS);      // the caller's name
 
         List<String> missing = new ArrayList<>();
         for (String p : need) {
@@ -118,12 +125,32 @@ public final class MainActivity extends Activity implements NavService.Listener 
         refresh();
     }
 
+    // ---------- theme ----------
+
+    /** Picks the colours for now and rebuilds the screen with them. */
+    private void applyTheme() {
+        NavService s = NavService.instance;
+        light = Theme.isLight(s == null ? null : s.last);
+        bg = light ? Color.WHITE : Color.BLACK;
+        fg = light ? Color.BLACK : Color.WHITE;
+        grey = light ? 0xFF6E6E6E : 0xFF8A8A8A;
+        line = light ? 0xFFCCCCCC : 0xFF3A3A3A;
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        getWindow().getDecorView().setSystemUiVisibility(light
+                ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0);
+        String typed = input == null ? "" : input.getText().toString();
+        setContentView(buildUi());
+        input.setText(typed);
+    }
+
     // ---------- state -> screen ----------
 
     private void refresh() {
         NavService s = NavService.instance;
+        if (light != Theme.isLight(s == null ? null : s.last)) applyTheme();
         if (s == null) {
-            speedView.setText("--");
+            bigView.setText("--");
             return;
         }
         LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
@@ -132,10 +159,28 @@ public final class MainActivity extends Activity implements NavService.Listener 
                 : String.format(Locale.US, "%s ±%.0f m",
                         LocationManager.GPS_PROVIDER.equals(s.last.getProvider()) ? "GPS" : "Rough location",
                         s.last.getAccuracy());
-        status.setText(s.ble.state + "  ·  " + gps);
-        speedView.setText(s.last == null ? "--" : String.valueOf(Math.round(s.speed * 3.6f)));
+        String call = s.callState != 1 ? ""
+                : "Incoming call" + (s.callName.isEmpty() ? "" : ": " + s.callName) + "  ·  ";
+        status.setText(call + s.ble.state + "  ·  " + gps);
 
+        long nowMs = System.currentTimeMillis();
+        String kmh = s.last == null ? "" : Math.round(s.speed * 3.6f) + " km/h";
         NavRoute r = s.route;
+        if (r != null) {
+            int secs = r.remainingTimeS();
+            boolean hours = secs >= 3600;
+            bigView.setText(hours ? String.format(Locale.US, "%d:%02d", secs / 3600, secs % 3600 / 60)
+                    : String.valueOf(Math.max(1, Math.round(secs / 60f))));
+            bigLabel.setText(hours ? "HOURS LEFT" : "MIN LEFT");
+            subLabel.setText("Arrive " + clock(nowMs + secs * 1000L) + (kmh.isEmpty() ? "" : "  ·  " + kmh));
+        } else {
+            boolean h24 = DateFormat.is24HourFormat(this);
+            Date d = new Date(nowMs);
+            bigView.setText(DateFormat.format(h24 ? "HH:mm" : "h:mm", d));
+            bigLabel.setText(h24 ? "TIME" : DateFormat.format("a", d).toString().toUpperCase(Locale.US));
+            subLabel.setText(kmh);
+        }
+
         if (r != null) {
             turnView.setText(turnText(r.turnAngle) + " in " + dist(r.distToTurn));
             String extra = s.message.isEmpty() ? dist(r.remaining()) + " left" : s.message;
@@ -149,6 +194,10 @@ public final class MainActivity extends Activity implements NavService.Listener 
         }
         navRow.setVisibility(s.hasDest ? View.VISIBLE : View.GONE);
         mapBtn.setVisibility(r != null && Router.hasKey() ? View.VISIBLE : View.GONE);
+    }
+
+    private String clock(long ms) {
+        return DateFormat.format(DateFormat.is24HourFormat(this) ? "HH:mm" : "h:mm a", new Date(ms)).toString();
     }
 
     private static String turnText(int a) {
@@ -197,7 +246,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
     }
 
     private View resultRow(Router.Place p) {
-        TextView t = text(p.name, 15, Color.WHITE);
+        TextView t = text(p.name, 15, fg);
         t.setPadding(0, dp(14), 0, dp(14));
         t.setMaxLines(2);
         t.setEllipsize(TextUtils.TruncateAt.END);
@@ -217,7 +266,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
 
     private void showMessage(String m) {
         clearPanel();
-        TextView t = text(m, 14, GREY);
+        TextView t = text(m, 14, grey);
         t.setPadding(0, dp(14), 0, 0);
         results.addView(t);
     }
@@ -249,7 +298,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
         map.setAdjustViewBounds(true);
         map.setVisibility(View.GONE);
         results.addView(map, new LinearLayout.LayoutParams(-1, -2));
-        TextView mapMsg = text(Router.hasKey() ? "Loading map" : "Map needs an Ola Maps key", 12, GREY);
+        TextView mapMsg = text(Router.hasKey() ? "Loading map" : "Map needs an Ola Maps key", 12, grey);
         mapMsg.setLetterSpacing(0.2f);
         mapMsg.setPadding(0, dp(10), 0, dp(10));
         results.addView(mapMsg);
@@ -267,11 +316,11 @@ public final class MainActivity extends Activity implements NavService.Listener 
             map.setOnClickListener(v -> startActivity(MapActivity.intent(this, r.outline(from, 500), me)));
         }
 
-        TextView name = text(r.name, 20, Color.WHITE);
+        TextView name = text(r.name, 20, fg);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         results.addView(name);
         String info = preview ? dist(r.totalM()) + "  ·  " + time(r.durationS) : dist(r.remaining()) + " left";
-        TextView infoView = text(info, 14, GREY);
+        TextView infoView = text(info, 14, grey);
         infoView.setPadding(0, dp(4), 0, dp(16));
         results.addView(infoView);
 
@@ -304,7 +353,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
 
     private void showKeyState() {
         keyBtn.setText(Router.hasKey() ? "OLA MAPS" : "ADD MAP KEY");
-        keyBtn.setTextColor(Router.hasKey() ? Color.WHITE : GREY);
+        keyBtn.setTextColor(Router.hasKey() ? fg : grey);
     }
 
     /** Lets the user paste their own Ola Maps key; it is stored on the phone only. */
@@ -347,22 +396,33 @@ public final class MainActivity extends Activity implements NavService.Listener 
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(bg);
         root.setPadding(dp(24), dp(20), dp(24), dp(16));
 
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("BEELINE NAV", 12, Color.WHITE);
+        TextView title = text("BEELINE NAV", 12, fg);
         title.setLetterSpacing(0.3f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        keyBtn = text("", 12, GREY);
+        TextView themeBtn = text(Theme.modeName(), 12, grey);   // AUTO -> LIGHT -> DARK
+        themeBtn.setLetterSpacing(0.3f);
+        themeBtn.setPadding(dp(12), dp(8), dp(8), dp(8));
+        themeBtn.setOnClickListener(v -> {
+            Theme.setMode(this, (Theme.mode() + 1) % 3);
+            NavService s = NavService.instance;
+            if (s != null) s.refreshTheme();
+            applyTheme();
+            refresh();
+        });
+        top.addView(themeBtn);
+        keyBtn = text("", 12, grey);
         keyBtn.setLetterSpacing(0.3f);
         keyBtn.setPadding(dp(12), dp(8), dp(8), dp(8));
         keyBtn.setOnClickListener(v -> askKey());
         top.addView(keyBtn);
         showKeyState();
-        TextView quit = text("QUIT", 12, GREY);
+        TextView quit = text("QUIT", 12, grey);
         quit.setLetterSpacing(0.3f);
         quit.setPadding(dp(12), dp(8), 0, dp(8));
         quit.setOnClickListener(v -> {
@@ -372,7 +432,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
         top.addView(quit);
         root.addView(top);
 
-        status = text("Starting", 13, GREY);
+        status = text("Starting", 13, grey);
         status.setPadding(0, dp(4), 0, 0);
         root.addView(status);
 
@@ -380,24 +440,29 @@ public final class MainActivity extends Activity implements NavService.Listener 
         dash.setOrientation(LinearLayout.VERTICAL);
         root.addView(dash, new LinearLayout.LayoutParams(-1, -2));
 
-        speedView = text("--", 112, Color.WHITE);
-        speedView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
-        speedView.setGravity(Gravity.CENTER);
-        speedView.setIncludeFontPadding(false);
-        speedView.setPadding(0, dp(28), 0, 0);
-        dash.addView(speedView, new LinearLayout.LayoutParams(-1, -2));
+        bigView = text("--", 96, fg);            // minutes to arrive, or the clock when idle
+        bigView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
+        bigView.setGravity(Gravity.CENTER);
+        bigView.setIncludeFontPadding(false);
+        bigView.setPadding(0, dp(28), 0, 0);
+        dash.addView(bigView, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView unit = text("KM/H", 13, GREY);
-        unit.setLetterSpacing(0.3f);
-        unit.setGravity(Gravity.CENTER);
-        dash.addView(unit, new LinearLayout.LayoutParams(-1, -2));
+        bigLabel = text("", 13, grey);
+        bigLabel.setLetterSpacing(0.3f);
+        bigLabel.setGravity(Gravity.CENTER);
+        dash.addView(bigLabel, new LinearLayout.LayoutParams(-1, -2));
 
-        turnView = text("No destination", 24, Color.WHITE);
+        subLabel = text("", 14, grey);
+        subLabel.setGravity(Gravity.CENTER);
+        subLabel.setPadding(0, dp(6), 0, 0);
+        dash.addView(subLabel, new LinearLayout.LayoutParams(-1, -2));
+
+        turnView = text("No destination", 24, fg);
         turnView.setTypeface(Typeface.DEFAULT_BOLD);
-        turnView.setPadding(0, dp(32), 0, 0);
+        turnView.setPadding(0, dp(28), 0, 0);
         dash.addView(turnView);
 
-        destView = text("", 14, GREY);
+        destView = text("", 14, grey);
         destView.setPadding(0, dp(4), 0, dp(20));
         dash.addView(destView);
 
@@ -405,8 +470,8 @@ public final class MainActivity extends Activity implements NavService.Listener 
         row.setGravity(Gravity.CENTER_VERTICAL);
         input = new EditText(this);
         input.setHint("Destination, or lat,lon");
-        input.setHintTextColor(GREY);
-        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(grey);
+        input.setTextColor(fg);
         input.setTextSize(16);
         input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -463,26 +528,25 @@ public final class MainActivity extends Activity implements NavService.Listener 
     }
 
     private TextView button(String label) {
-        TextView b = text(label, 13, Color.WHITE);
+        TextView b = text(label, 13, fg);
         b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setLetterSpacing(0.2f);
         b.setGravity(Gravity.CENTER);
         b.setPadding(dp(18), dp(14), dp(18), dp(14));
         GradientDrawable g = new GradientDrawable();
-        g.setColor(Color.BLACK);
-        g.setStroke(dp(1), Color.WHITE);
+        g.setColor(bg);
+        g.setStroke(dp(1), fg);
         g.setCornerRadius(dp(6));
         b.setBackground(g);
         return b;
     }
 
     /** A 1 dp line along the bottom edge, for the input field and result rows. */
-    private android.graphics.drawable.Drawable underline() {
+    private Drawable underline() {
         GradientDrawable g = new GradientDrawable();
         g.setColor(Color.TRANSPARENT);
-        g.setStroke(dp(1), LINE);
-        android.graphics.drawable.LayerDrawable l =
-                new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{g});
+        g.setStroke(dp(1), line);
+        LayerDrawable l = new LayerDrawable(new Drawable[]{g});
         l.setLayerInset(0, -dp(2), -dp(2), -dp(2), 0);
         return l;
     }
