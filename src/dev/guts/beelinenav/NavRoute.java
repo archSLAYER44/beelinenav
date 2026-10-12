@@ -13,6 +13,7 @@ final class NavRoute {
     static final int ARRIVE = 999;        // turnAngle value the display draws as "destination"
     private static final int WINDOW = 48; // most points the display accepts in one route packet
     private static final double M_LAT = 110540, M_LON = 111320;
+    private static final double TURN_SPAN_M = 20;   // how far either side of a turn its angle is measured
 
     final String name;
     final double destLat, destLon;
@@ -91,6 +92,133 @@ final class NavRoute {
         }
         if (pts.size() < 2) throw new JSONException("Route is too short");
         return new NavRoute(name, destLat, destLon, pts, mans);
+    }
+
+    /**
+     * Builds a route from an Ola Maps directions response (Google-style JSON): the encoded
+     * overview line gives the shape, each step's start point marks where a turn may be.
+     */
+    static NavRoute fromOla(JSONObject root, String name, double destLat, double destLon)
+            throws JSONException {
+        JSONArray routes = root.optJSONArray("routes");
+        if (routes == null || routes.length() == 0) throw new JSONException("No route found");
+        JSONObject route = routes.getJSONObject(0);
+
+        Object ov = route.opt("overview_polyline");
+        String enc = ov instanceof JSONObject ? ((JSONObject) ov).optString("points")
+                : ov instanceof String ? (String) ov : "";
+        if (enc.isEmpty()) throw new JSONException("No route line in the response");
+        double[][] line = decodePolyline(enc, 1e5);
+        if (line.length > 0 && Math.abs(line[0][0]) > 90) line = decodePolyline(enc, 1e6);
+
+        ArrayList<double[]> turns = new ArrayList<>();
+        JSONArray legs = route.optJSONArray("legs");
+        for (int l = 0; legs != null && l < legs.length(); l++) {
+            JSONArray steps = legs.getJSONObject(l).optJSONArray("steps");
+            for (int s = 0; steps != null && s < steps.length(); s++) {
+                JSONObject at = steps.getJSONObject(s).optJSONObject("start_location");
+                if (at != null) turns.add(new double[]{at.optDouble("lat"), at.optDouble("lng")});
+            }
+        }
+        return fromLine(line, turns.toArray(new double[0][]), name, destLat, destLon);
+    }
+
+    /**
+     * Builds a route from a full-resolution line of {lat, lon} points and the places where the
+     * instructions change. Turn angles are measured from the line itself.
+     */
+    static NavRoute fromLine(double[][] line, double[][] turnPoints, String name,
+                             double destLat, double destLon) throws JSONException {
+        int n = line.length;
+        if (n < 2) throw new JSONException("Route is too short");
+        double c = Math.cos(Math.toRadians(line[0][0]));
+        double[] px = new double[n], py = new double[n];
+        for (int i = 0; i < n; i++) {
+            px[i] = (line[i][1] - line[0][1]) * M_LON * c;
+            py[i] = (line[i][0] - line[0][0]) * M_LAT;
+        }
+
+        // Nearest vertex for each turn point, never going backwards along the line
+        boolean[] cut = new boolean[n];
+        cut[0] = cut[n - 1] = true;
+        int from = 0;
+        for (double[] t : turnPoints) {
+            double tx = (t[1] - line[0][1]) * M_LON * c, ty = (t[0] - line[0][0]) * M_LAT;
+            double best = Double.MAX_VALUE;
+            int at = from;
+            for (int i = from; i < n; i++) {
+                double d = Math.hypot(px[i] - tx, py[i] - ty);
+                if (d < best) {
+                    best = d;
+                    at = i;
+                }
+            }
+            if (best > 50) continue;        // step point is nowhere near the line; ignore it
+            cut[at] = true;
+            from = at;
+        }
+
+        ArrayList<double[]> pts = new ArrayList<>();
+        ArrayList<int[]> mans = new ArrayList<>();
+        int start = 0;
+        for (int end = 1; end < n; end++) {
+            if (!cut[end]) continue;
+            // Simplify each stretch on its own so the turn vertices are always kept
+            double[][] part = java.util.Arrays.copyOfRange(line, start, end + 1);
+            boolean[] keep = simplify(part, 4.0);
+            for (int i = 0; i < part.length; i++) {
+                boolean dup = !pts.isEmpty() && same(pts.get(pts.size() - 1), part[i]);
+                if (keep[i] && !dup) pts.add(part[i]);
+            }
+            if (end < n - 1) {
+                double a = norm180(bearingAlong(px, py, end, TURN_SPAN_M) - bearingAlong(px, py, end, -TURN_SPAN_M));
+                if (Math.abs(a) >= 20) mans.add(new int[]{pts.size() - 1, (int) Math.round(a)});
+            }
+            start = end;
+        }
+        if (pts.size() < 2) throw new JSONException("Route is too short");
+        mans.add(new int[]{pts.size() - 1, ARRIVE});
+        return new NavRoute(name, destLat, destLon, pts, mans);
+    }
+
+    /** Bearing of travel just after vertex i (span > 0) or just before it (span < 0), in degrees. */
+    private static double bearingAlong(double[] px, double[] py, int i, double span) {
+        int step = span > 0 ? 1 : -1, j = i;
+        double left = Math.abs(span);
+        while (j + step >= 0 && j + step < px.length && left > 0) {
+            left -= Math.hypot(px[j + step] - px[j], py[j + step] - py[j]);
+            j += step;
+        }
+        double dx = px[j] - px[i], dy = py[j] - py[i];
+        if (step < 0) {
+            dx = -dx;
+            dy = -dy;
+        }
+        return Math.toDegrees(Math.atan2(dx, dy));
+    }
+
+    /** Google encoded polyline to {lat, lon} points. */
+    static double[][] decodePolyline(String enc, double precision) {
+        ArrayList<double[]> out = new ArrayList<>();
+        int i = 0;
+        long lat = 0, lon = 0;
+        while (i < enc.length()) {
+            long[] v = new long[2];
+            for (int k = 0; k < 2 && i < enc.length(); k++) {
+                long result = 0;
+                int shift = 0, b;
+                do {
+                    b = enc.charAt(i++) - 63;
+                    result |= (long) (b & 0x1f) << shift;
+                    shift += 5;
+                } while (b >= 0x20 && i < enc.length());
+                v[k] = (result & 1) != 0 ? ~(result >> 1) : result >> 1;
+            }
+            lat += v[0];
+            lon += v[1];
+            out.add(new double[]{lat / precision, lon / precision});
+        }
+        return out.toArray(new double[0][]);
     }
 
     /** Re-centres the metre grid. Needed because route packets carry int16 metres (about 32 km). */

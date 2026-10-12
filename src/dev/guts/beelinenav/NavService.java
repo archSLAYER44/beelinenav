@@ -41,7 +41,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     private float heading;
     private boolean haveHeading;
     private int offCount, sentSeg = -1;
-    private long lastRouteRequest;
+    private long lastRouteRequest, lastGpsMs = -100000;
 
     @Override
     public void onCreate() {
@@ -50,11 +50,19 @@ public final class NavService extends Service implements LocationListener, Ble.L
         goForeground();
         ble = new Ble(this, this);
         ble.start();
-        try {
-            LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this, Looper.getMainLooper());
-        } catch (SecurityException | IllegalArgumentException e) {
-            message = "GPS is not available";
+        // GPS alone can take minutes for a first fix, so start from the last known position
+        // and accept rough network fixes until GPS takes over.
+        LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        for (String p : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) {
+            try {
+                if (!lm.getAllProviders().contains(p)) continue;
+                lm.requestLocationUpdates(p, 1000, 0, this, Looper.getMainLooper());
+                Location l = lm.getLastKnownLocation(p);
+                boolean fresh = l != null && System.currentTimeMillis() - l.getTime() < 120000;
+                if (fresh && (last == null || l.getTime() > last.getTime())) last = l;
+            } catch (SecurityException | IllegalArgumentException e) {
+                message = "Location is not available";
+            }
         }
     }
 
@@ -104,13 +112,15 @@ public final class NavService extends Service implements LocationListener, Ble.L
 
     @Override
     public void onLocationChanged(Location loc) {
+        long now = SystemClock.elapsedRealtime();
+        if (LocationManager.GPS_PROVIDER.equals(loc.getProvider())) lastGpsMs = now;
+        else if (now - lastGpsMs < 10000) return;   // GPS is live; ignore the rougher network fix
         last = loc;
         speed = loc.hasSpeed() ? loc.getSpeed() : 0;
         if (loc.hasBearing() && speed > 1.0f) {     // GPS bearing is noise when standing still
             heading = loc.getBearing();
             haveHeading = true;
         }
-        long now = SystemClock.elapsedRealtime();
         if (hasDest && route == null && !routing && now - lastRouteRequest > REROUTE_GAP_MS) requestRoute();
         tick();
         notifyUi();

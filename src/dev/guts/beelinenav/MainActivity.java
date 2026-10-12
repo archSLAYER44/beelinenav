@@ -73,6 +73,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
     private void askPermissions() {
         List<String> need = new ArrayList<>();
         need.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        need.add(Manifest.permission.ACCESS_COARSE_LOCATION);   // Android 12+ ignores a fine-only request
         if (Build.VERSION.SDK_INT >= 31) {
             need.add(Manifest.permission.BLUETOOTH_SCAN);
             need.add(Manifest.permission.BLUETOOTH_CONNECT);
@@ -123,7 +124,9 @@ public final class MainActivity extends Activity implements NavService.Listener 
         LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         String gps = !lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ? "Location is off"
                 : s.last == null ? "Waiting for GPS"
-                : String.format(Locale.US, "GPS ±%.0f m", s.last.getAccuracy());
+                : String.format(Locale.US, "%s ±%.0f m",
+                        LocationManager.GPS_PROVIDER.equals(s.last.getProvider()) ? "GPS" : "Rough location",
+                        s.last.getAccuracy());
         status.setText(s.ble.state + "  ·  " + gps);
         speedView.setText(s.last == null ? "--" : String.valueOf(Math.round(s.speed * 3.6f)));
 

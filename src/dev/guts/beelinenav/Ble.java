@@ -37,6 +37,7 @@ final class Ble {
     private static final UUID ROUTE = UUID.fromString("7b1e0002-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID POSE = UUID.fromString("7b1e0003-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final String NAME = "BeelineNav";
+    private static final long FAST_SCAN_MS = 30000;   // scan flat out at first, then ease off to save battery
 
     private final Context ctx;
     private final Listener listener;
@@ -45,7 +46,7 @@ final class Ble {
     private BluetoothGatt gatt;
     private BluetoothGattCharacteristic routeCh, poseCh;
     private boolean running, scanning, busy;
-    private long busySince;
+    private long busySince, fastUntil;
     private byte[] pendingRoute, pendingPose;   // only the newest of each is worth sending
 
     String state = "Starting";
@@ -58,6 +59,7 @@ final class Ble {
 
     void start() {
         running = true;
+        fastUntil = SystemClock.elapsedRealtime() + FAST_SCAN_MS;
         scan();
     }
 
@@ -116,16 +118,26 @@ final class Ble {
         List<ScanFilter> filters = Arrays.asList(
                 new ScanFilter.Builder().setServiceUuid(new ParcelUuid(SVC)).build(),
                 new ScanFilter.Builder().setDeviceName(NAME).build());
+        boolean fast = SystemClock.elapsedRealtime() < fastUntil;
         ScanSettings settings = new ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_BALANCED).build();
+                .setScanMode(fast ? ScanSettings.SCAN_MODE_LOW_LATENCY : ScanSettings.SCAN_MODE_BALANCED)
+                .build();
         try {
             s.startScan(filters, settings, scanCb);
             scanning = true;
             setState("Searching for display");
+            main.removeCallbacks(slowDown);
+            if (fast) main.postDelayed(slowDown, FAST_SCAN_MS);
         } catch (SecurityException e) {
             setState("Bluetooth permission missing");
         }
     }
+
+    private final Runnable slowDown = () -> {
+        if (!scanning) return;
+        stopScan();
+        scan();
+    };
 
     private void stopScan() {
         if (!scanning) return;
@@ -153,7 +165,8 @@ final class Ble {
         routeCh = poseCh = null;
         ready = busy = false;
         setState("Display disconnected");
-        if (running) main.postDelayed(this::scan, 1500);
+        fastUntil = SystemClock.elapsedRealtime() + FAST_SCAN_MS;
+        if (running) main.postDelayed(this::scan, 300);
     }
 
     private void setState(String s) {
