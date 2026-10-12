@@ -36,7 +36,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Control screen: time to arrive, next turn, destination search. Light by day, dark by night. */
+/** BeeNav control screen: time to arrive, next turn, destination search. Light by day, dark by night. */
 public final class MainActivity extends Activity implements NavService.Listener {
     private static final Pattern LAT_LON =
             Pattern.compile("^\\s*(-?\\d{1,2}(?:\\.\\d+)?)\\s*,\\s*(-?\\d{1,3}(?:\\.\\d+)?)\\s*$");
@@ -401,7 +401,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
 
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text("BEELINE NAV", 12, fg);
+        TextView title = text("BEENAV", 12, fg);
         title.setLetterSpacing(0.3f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1));

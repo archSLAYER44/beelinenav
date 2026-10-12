@@ -21,7 +21,7 @@
     <uses-feature android:name="android.hardware.location.gps" android:required="true" />
 
     <application
-        android:label="Beeline Nav"
+        android:label="BeeNav"
         android:icon="@drawable/ic_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar">
 

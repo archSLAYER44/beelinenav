@@ -25,11 +25,13 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.ContactsContract;
 import android.telephony.TelephonyManager;
+import android.text.format.DateFormat;
 import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.Calendar;
 
 /** Keeps GPS, routing and the display link alive while the screen is off. Everything runs on the main thread. */
 public final class NavService extends Service implements LocationListener, Ble.Listener {
@@ -168,7 +170,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         day = Theme.isLight(last);
         NavRoute r = route;
         if (r == null) {
-            ble.sendPose(pose(0, 0, heading, speed, 0, 0, day));   // display shows a plain speedometer
+            ble.sendPose(pose(0, 0, heading, speed, 0, 0, day, 0xFFFF));   // display shows clock and speed
             return;
         }
         double px = r.toX(last.getLongitude()), py = r.toY(last.getLatitude());
@@ -183,7 +185,8 @@ public final class NavService extends Service implements LocationListener, Ble.L
             ble.sendRoute(r.routePacket());
             sentSeg = r.seg;
         }
-        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day));
+        int eta = Math.min(0xFFFE, Math.round(r.remainingTimeS() / 60f));
+        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day, eta));
 
         offCount = r.offRoute > OFF_ROUTE_M ? offCount + 1 : 0;
         long now = SystemClock.elapsedRealtime();
@@ -211,10 +214,14 @@ public final class NavService extends Service implements LocationListener, Ble.L
         });
     }
 
-    /** Pose packet, 17 bytes LE: int32 x, y (dm), uint16 heading (0.01 deg), speed (cm/s), dist (m), int16 angle, uint8 flags (bit0 = day). */
-    private static byte[] pose(double x, double y, float heading, float speed, double dist, int angle, boolean day) {
+    /**
+     * Pose packet, 19 bytes LE: int32 x, y (dm), uint16 heading (0.01 deg), speed (cm/s), dist (m),
+     * int16 angle, uint8 flags (bit0 = day), uint16 minutes to arrive (0xFFFF = none).
+     */
+    private static byte[] pose(double x, double y, float heading, float speed, double dist, int angle,
+                               boolean day, int etaMin) {
         float h = ((heading % 360) + 360) % 360;
-        ByteBuffer b = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer b = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN);
         b.putInt((int) Math.round(x * 10));
         b.putInt((int) Math.round(y * 10));
         b.putShort((short) Math.min(35999, Math.round(h * 100)));
@@ -222,6 +229,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         b.putShort((short) Math.min(65535, Math.round(dist)));
         b.putShort((short) angle);
         b.put((byte) (day ? 1 : 0));
+        b.putShort((short) etaMin);
         return b.array();
     }
 
@@ -235,6 +243,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     @Override
     public void onBleReady() {
         sentSeg = -1;                                  // the display forgets everything on reconnect
+        ble.sendTime(timePacket());
         if (callState != 0) ble.sendCall(callPacket(callState, callName));
         if (route == null) ble.sendRoute(new byte[]{0});
         if (last != null) tick();
@@ -252,6 +261,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
                 if (last != null) tick();      // tell the display straight away
                 notifyUi();
             }
+            ble.sendTime(timePacket());        // keeps the display's clock in step
             timer.postDelayed(this, 60000);
         }
     };
@@ -260,6 +270,14 @@ public final class NavService extends Service implements LocationListener, Ble.L
     void refreshTheme() {
         timer.removeCallbacks(themeCheck);
         timer.post(themeCheck);
+    }
+
+    /** Time packet: uint16 minutes since local midnight, uint8 flags (bit0 day, bit1 12-hour clock). */
+    private byte[] timePacket() {
+        Calendar c = Calendar.getInstance();
+        int mins = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
+        int flags = (day ? 1 : 0) | (DateFormat.is24HourFormat(this) ? 0 : 2);
+        return new byte[]{(byte) mins, (byte) (mins >> 8), (byte) flags};
     }
 
     // ---------- phone calls ----------
@@ -330,7 +348,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Notification n = new Notification.Builder(this, "nav")
-                .setContentTitle("Beeline Nav")
+                .setContentTitle("BeeNav")
                 .setContentText("Sending speed and directions to the display")
                 .setSmallIcon(R.drawable.ic_stat)
                 .setContentIntent(open)

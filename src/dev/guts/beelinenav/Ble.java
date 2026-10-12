@@ -37,7 +37,8 @@ final class Ble {
     private static final UUID ROUTE = UUID.fromString("7b1e0002-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID POSE = UUID.fromString("7b1e0003-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID CALL = UUID.fromString("7b1e0004-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
-    private static final String NAME = "BeelineNav";
+    private static final UUID TIME = UUID.fromString("7b1e0005-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
+    private static final String NAME = "BeeNav";
     private static final long FAST_SCAN_MS = 30000;   // scan flat out at first, then ease off to save battery
 
     private final Context ctx;
@@ -45,10 +46,10 @@ final class Ble {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic routeCh, poseCh, callCh;
+    private BluetoothGattCharacteristic routeCh, poseCh, callCh, timeCh;
     private boolean running, scanning, busy;
     private long busySince, fastUntil;
-    private byte[] pendingRoute, pendingPose, pendingCall;   // only the newest of each is worth sending
+    private byte[] pendingRoute, pendingPose, pendingCall, pendingTime;   // only the newest of each is worth sending
 
     String state = "Starting";
     boolean ready;
@@ -91,12 +92,18 @@ final class Ble {
         pump();
     }
 
-    // Android allows one GATT operation at a time, so writes go out one by one: route, then call, then pose.
+    void sendTime(byte[] packet) {
+        pendingTime = packet;
+        pump();
+    }
+
+    // Android allows one GATT operation at a time, so writes go out one by one: route, call, time, then pose.
     private void pump() {
         if (!ready || gatt == null) return;
         long now = SystemClock.elapsedRealtime();
         if (busy && now - busySince < 2000) return;
         if (pendingCall != null && callCh == null) pendingCall = null;   // old firmware without the call screen
+        if (pendingTime != null && timeCh == null) pendingTime = null;
 
         BluetoothGattCharacteristic ch;
         byte[] data;
@@ -108,6 +115,10 @@ final class Ble {
             ch = callCh;
             data = pendingCall;
             pendingCall = null;
+        } else if (pendingTime != null) {
+            ch = timeCh;
+            data = pendingTime;
+            pendingTime = null;
         } else if (pendingPose != null) {
             ch = poseCh;
             data = pendingPose;
@@ -183,7 +194,7 @@ final class Ble {
         g.close();
         if (g != gatt) return;
         gatt = null;
-        routeCh = poseCh = callCh = null;
+        routeCh = poseCh = callCh = timeCh = null;
         ready = busy = false;
         setState("Display disconnected");
         fastUntil = SystemClock.elapsedRealtime() + FAST_SCAN_MS;
@@ -236,6 +247,7 @@ final class Ble {
                 routeCh = svc == null ? null : svc.getCharacteristic(ROUTE);
                 poseCh = svc == null ? null : svc.getCharacteristic(POSE);
                 callCh = svc == null ? null : svc.getCharacteristic(CALL);   // absent on older firmware
+                timeCh = svc == null ? null : svc.getCharacteristic(TIME);
                 if (routeCh == null || poseCh == null) {
                     g.disconnect();
                     return;
