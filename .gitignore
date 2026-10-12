@@ -1,4 +1,20 @@
+# Secrets: never commit these
 ola_key.txt
+*_key.txt
+*.keystore
+*.jks
+
+# Build output (rebuild with ./build.sh)
 build/
 *.apk
 *.idsig
+
+# Editor and OS files
+.idea/
+*.iml
+.vscode/
+local.properties
+.gradle/
+.DS_Store
+Thumbs.db
+*.log
