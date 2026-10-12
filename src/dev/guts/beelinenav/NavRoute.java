@@ -288,6 +288,17 @@ final class NavRoute {
 
     double remaining() { return Math.max(0, cum[n - 1] - progress); }
 
+    double x(int i) { return x[i]; }
+    double y(int i) { return y[i]; }
+
+    /** Index of the route point about `metres` further along than the start of segment `from`. */
+    int indexAhead(int from, double metres) {
+        double target = cum[from] + metres;
+        int i = from;
+        while (i < n - 1 && cum[i] < target) i++;
+        return i;
+    }
+
     double totalM() { return cum[n - 1]; }
 
     /** Time left at the pace the routing service predicted, seconds. */

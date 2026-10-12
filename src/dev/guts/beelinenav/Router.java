@@ -172,6 +172,11 @@ final class Router {
         return new String(requestBytes(method, url), java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /** GET of a binary resource such as a map tile; gunzipped when the server sent it compressed. */
+    static byte[] fetch(String url) throws IOException {
+        return requestBytes("GET", url);
+    }
+
     private static byte[] requestBytes(String method, String url) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         try {
@@ -193,7 +198,15 @@ final class Router {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buf = new byte[8192];
                 for (int k; (k = in.read(buf)) > 0; ) out.write(buf, 0, k);
-                return out.toByteArray();
+                byte[] body = out.toByteArray();
+                if (body.length > 2 && (body[0] & 0xFF) == 0x1F && (body[1] & 0xFF) == 0x8B) {   // gzip magic
+                    try (InputStream gz = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(body))) {
+                        ByteArrayOutputStream plain = new ByteArrayOutputStream();
+                        for (int k; (k = gz.read(buf)) > 0; ) plain.write(buf, 0, k);
+                        body = plain.toByteArray();
+                    }
+                }
+                return body;
             }
         } finally {
             c.disconnect();

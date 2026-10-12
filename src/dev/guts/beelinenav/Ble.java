@@ -20,6 +20,7 @@ import android.os.Looper;
 import android.os.ParcelUuid;
 import android.os.SystemClock;
 
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -38,6 +39,7 @@ final class Ble {
     private static final UUID POSE = UUID.fromString("7b1e0003-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID CALL = UUID.fromString("7b1e0004-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final UUID TIME = UUID.fromString("7b1e0005-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
+    private static final UUID ROADS = UUID.fromString("7b1e0006-5c3a-4f6e-9d2b-8a4c6e0f1a2b");
     private static final String NAME = "BeeNav";
     private static final long FAST_SCAN_MS = 30000;   // scan flat out at first, then ease off to save battery
 
@@ -46,10 +48,11 @@ final class Ble {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private BluetoothGatt gatt;
-    private BluetoothGattCharacteristic routeCh, poseCh, callCh, timeCh;
+    private BluetoothGattCharacteristic routeCh, poseCh, callCh, timeCh, roadsCh;
     private boolean running, scanning, busy;
     private long busySince, fastUntil;
     private byte[] pendingRoute, pendingPose, pendingCall, pendingTime;   // only the newest of each is worth sending
+    private final ArrayDeque<byte[]> pendingRoads = new ArrayDeque<>();  // one side-road set, in chunks
 
     String state = "Starting";
     boolean ready;
@@ -97,13 +100,21 @@ final class Ble {
         pump();
     }
 
-    // Android allows one GATT operation at a time, so writes go out one by one: route, call, time, then pose.
+    /** Replaces whatever side-road set was still going out with this one. */
+    void sendRoads(List<byte[]> packets) {
+        pendingRoads.clear();
+        pendingRoads.addAll(packets);
+        pump();
+    }
+
+    // Android allows one GATT operation at a time, so writes go out one by one: route, roads, call, time, then pose.
     private void pump() {
         if (!ready || gatt == null) return;
         long now = SystemClock.elapsedRealtime();
         if (busy && now - busySince < 2000) return;
         if (pendingCall != null && callCh == null) pendingCall = null;   // old firmware without the call screen
         if (pendingTime != null && timeCh == null) pendingTime = null;
+        if (roadsCh == null) pendingRoads.clear();
 
         BluetoothGattCharacteristic ch;
         byte[] data;
@@ -111,6 +122,9 @@ final class Ble {
             ch = routeCh;
             data = pendingRoute;
             pendingRoute = null;
+        } else if (!pendingRoads.isEmpty()) {
+            ch = roadsCh;
+            data = pendingRoads.poll();
         } else if (pendingCall != null) {
             ch = callCh;
             data = pendingCall;
@@ -134,6 +148,7 @@ final class Ble {
         if (!busy) {   // write refused: keep the important ones for the next attempt
             if (ch == routeCh && pendingRoute == null) pendingRoute = data;
             if (ch == callCh && pendingCall == null) pendingCall = data;
+            if (ch == roadsCh) pendingRoads.addFirst(data);
         }
     }
 
@@ -190,11 +205,21 @@ final class Ble {
         gatt = dev.connectGatt(ctx, false, gattCb, BluetoothDevice.TRANSPORT_LE);
     }
 
+    /** Android caches a device's GATT table forever; this hidden call makes it discover afresh. */
+    private static void refreshCache(BluetoothGatt g) {
+        try {
+            g.getClass().getMethod("refresh").invoke(g);
+        } catch (Exception ignored) {
+            // not available on this Android build; the cache then only clears when Bluetooth is toggled
+        }
+    }
+
     private void drop(BluetoothGatt g) {
         g.close();
         if (g != gatt) return;
         gatt = null;
-        routeCh = poseCh = callCh = timeCh = null;
+        routeCh = poseCh = callCh = timeCh = roadsCh = null;
+        pendingRoads.clear();
         ready = busy = false;
         setState("Display disconnected");
         fastUntil = SystemClock.elapsedRealtime() + FAST_SCAN_MS;
@@ -227,6 +252,7 @@ final class Ble {
         public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
             main.post(() -> {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    refreshCache(g);   // the display's service list has grown over firmware updates
                     if (!g.requestMtu(247)) g.discoverServices();
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     drop(g);
@@ -248,6 +274,7 @@ final class Ble {
                 poseCh = svc == null ? null : svc.getCharacteristic(POSE);
                 callCh = svc == null ? null : svc.getCharacteristic(CALL);   // absent on older firmware
                 timeCh = svc == null ? null : svc.getCharacteristic(TIME);
+                roadsCh = svc == null ? null : svc.getCharacteristic(ROADS);
                 if (routeCh == null || poseCh == null) {
                     g.disconnect();
                     return;

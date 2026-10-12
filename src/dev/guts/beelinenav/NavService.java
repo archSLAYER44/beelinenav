@@ -31,7 +31,9 @@ import android.util.Log;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.List;
 
 /** Keeps GPS, routing and the display link alive while the screen is off. Everything runs on the main thread. */
 public final class NavService extends Service implements LocationListener, Ble.Listener {
@@ -59,6 +61,9 @@ public final class NavService extends Service implements LocationListener, Ble.L
     private int offCount, sentSeg = -1;
     private long lastRouteRequest, lastGpsMs = -100000;
     private BroadcastReceiver callRx;
+    private List<Roads.Line> roads;          // side roads around the route, for the junction view
+    private int roadsSeg = -1;
+    private double roadsProgress = -1e9;
     private final Handler timer = new Handler(Looper.getMainLooper());
 
     @Override
@@ -126,6 +131,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         destLon = r.destLon;
         destName = r.name;
         route = r;
+        loadRoads(r);
         sentSeg = -1;
         offCount = 0;
         message = "";
@@ -137,6 +143,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     void stopNav() {
         hasDest = false;
         route = null;
+        clearRoads();
         message = "";
         ble.sendRoute(new byte[]{0});
         if (last != null) tick();
@@ -178,6 +185,8 @@ public final class NavService extends Service implements LocationListener, Ble.L
             r.setOrigin(last.getLatitude(), last.getLongitude());
             px = py = 0;
             sentSeg = -1;
+            if (roads != null) Roads.rebase(roads, r);
+            roadsSeg = -1;
         }
         r.snap(px, py);
         if (!haveHeading) heading = (float) r.bearing();
@@ -185,6 +194,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
             ble.sendRoute(r.routePacket());
             sentSeg = r.seg;
         }
+        if (roads != null && (r.seg != roadsSeg || Math.abs(r.progress - roadsProgress) > 250)) sendRoadsWindow(r, px, py);
         int eta = Math.min(0xFFFE, Math.round(r.remainingTimeS() / 60f));
         ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day, eta));
 
@@ -203,6 +213,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
             if (!hasDest || lat != destLat || lon != destLon) return;   // cancelled or changed meanwhile
             if (r != null) {
                 route = r;
+                loadRoads(r);
                 sentSeg = -1;
                 offCount = 0;
                 message = "";
@@ -243,11 +254,49 @@ public final class NavService extends Service implements LocationListener, Ble.L
     @Override
     public void onBleReady() {
         sentSeg = -1;                                  // the display forgets everything on reconnect
+        roadsSeg = -1;
         ble.sendTime(timePacket());
         if (callState != 0) ble.sendCall(callPacket(callState, callName));
         if (route == null) ble.sendRoute(new byte[]{0});
         if (last != null) tick();
         notifyUi();
+    }
+
+    // ---------- side roads for the junction view ----------
+
+    private void loadRoads(NavRoute r) {
+        roads = null;
+        roadsSeg = -1;
+        if (!Router.hasKey()) return;                  // the road shapes come from Ola's tiles
+        Roads.load(r, (lines, err) -> {
+            if (route != r) return;                    // the route changed while the tiles loaded
+            roads = lines;
+            roadsSeg = -1;
+            if (last != null) tick();
+        });
+    }
+
+    private void clearRoads() {
+        roads = null;
+        roadsSeg = -1;
+        ble.sendRoads(Roads.packets(new ArrayList<>()));   // an empty set wipes the display's copy
+    }
+
+    /** Sends the roads within 150 m of the next ~650 m of route, which is as far as the display looks. */
+    private void sendRoadsWindow(NavRoute r, double px, double py) {
+        int end = r.indexAhead(r.seg, 650);
+        double minX = px, maxX = px, minY = py, maxY = py;
+        for (int i = r.seg; i <= end; i++) {
+            minX = Math.min(minX, r.x(i));
+            maxX = Math.max(maxX, r.x(i));
+            minY = Math.min(minY, r.y(i));
+            maxY = Math.max(maxY, r.y(i));
+        }
+        List<Roads.Line> pieces = Roads.window(roads, minX - 150, minY - 150, maxX + 150, maxY + 150, 160);
+        ble.sendRoads(Roads.packets(pieces));
+        roadsSeg = r.seg;
+        roadsProgress = r.progress;
+        Log.i("BeelineNav", "roads window: " + pieces.size() + " pieces, " + Roads.pointCount(pieces) + " points");
     }
 
     // ---------- day / night ----------

@@ -161,7 +161,7 @@ public final class MainActivity extends Activity implements NavService.Listener 
                         s.last.getAccuracy());
         String call = s.callState != 1 ? ""
                 : "Incoming call" + (s.callName.isEmpty() ? "" : ": " + s.callName) + "  ·  ";
-        status.setText(call + s.ble.state + "  ·  " + gps);
+        status.setText(call + s.ble.state + "  ·  " + gps + "  ·  b" + Secrets.BUILD);
 
         long nowMs = System.currentTimeMillis();
         String kmh = s.last == null ? "" : Math.round(s.speed * 3.6f) + " km/h";

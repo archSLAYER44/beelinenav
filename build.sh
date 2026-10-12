@@ -21,8 +21,9 @@ mkdir -p build/gen build/classes build/dex
 # The map key stays out of git: it is read from ola_key.txt and compiled in. No file = OpenStreetMap.
 OLA_KEY=""
 if [ -f ola_key.txt ]; then OLA_KEY=$(tr -d '[:space:]' < ola_key.txt); fi
-printf 'package dev.guts.beelinenav;\n\nfinal class Secrets {\n    static final String OLA_KEY = "%s";\n}\n' \
-    "$OLA_KEY" > build/gen/dev/guts/beelinenav/Secrets.java
+BUILD_STAMP=$(date +%m%d.%H%M)
+printf 'package dev.guts.beelinenav;\n\nfinal class Secrets {\n    static final String OLA_KEY = "%s";\n    static final String BUILD = "%s";\n}\n' \
+    "$OLA_KEY" "$BUILD_STAMP" > build/gen/dev/guts/beelinenav/Secrets.java
 
 javac -encoding UTF-8 --release 11 -Xlint:-options -cp "$PLATFORM" -d build/classes \
     $(find src build/gen -name '*.java')
@@ -41,7 +42,7 @@ fi
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
     --out beelinenav.apk build/aligned.apk
 if [ -n "$OLA_KEY" ]; then MAPS="Ola Maps"; else MAPS="OpenStreetMap (no ola_key.txt)"; fi
-echo "Built $(pwd)/beelinenav.apk, routing via $MAPS"
+echo "Built $(pwd)/beelinenav.apk (build $BUILD_STAMP), routing via $MAPS"
 
 if [ "$1" = "install" ]; then
     adb install -r beelinenav.apk
