@@ -116,16 +116,22 @@ final class NavRoute {
         for (int l = 0; legs != null && l < legs.length(); l++) {
             JSONArray steps = legs.getJSONObject(l).optJSONArray("steps");
             for (int s = 0; steps != null && s < steps.length(); s++) {
-                JSONObject at = steps.getJSONObject(s).optJSONObject("start_location");
-                if (at != null) turns.add(new double[]{at.optDouble("lat"), at.optDouble("lng")});
+                JSONObject step = steps.getJSONObject(s);
+                JSONObject at = step.optJSONObject("start_location");
+                String man = step.optString("maneuver");
+                // "continue" is only a road-name change; the line's last point is the arrival
+                if (at == null || man.equals("depart") || man.equals("continue") || man.equals("arrive")) continue;
+                double side = man.contains("left") ? -1 : man.contains("right") ? 1 : 0;
+                turns.add(new double[]{at.optDouble("lat"), at.optDouble("lng"), side});
             }
         }
         return fromLine(line, turns.toArray(new double[0][]), name, destLat, destLon);
     }
 
     /**
-     * Builds a route from a full-resolution line of {lat, lon} points and the places where the
-     * instructions change. Turn angles are measured from the line itself.
+     * Builds a route from a full-resolution line of {lat, lon} points and the turn points
+     * {lat, lon, side}. Turn angles are measured from the line itself; side (-1 left, +1 right,
+     * 0 unknown) only decides the icon for turns too gentle to measure, like "keep right".
      */
     static NavRoute fromLine(double[][] line, double[][] turnPoints, String name,
                              double destLat, double destLon) throws JSONException {
@@ -140,6 +146,7 @@ final class NavRoute {
 
         // Nearest vertex for each turn point, never going backwards along the line
         boolean[] cut = new boolean[n];
+        double[] side = new double[n];
         cut[0] = cut[n - 1] = true;
         int from = 0;
         for (double[] t : turnPoints) {
@@ -155,6 +162,7 @@ final class NavRoute {
             }
             if (best > 50) continue;        // step point is nowhere near the line; ignore it
             cut[at] = true;
+            side[at] = t.length > 2 ? t[2] : 0;
             from = at;
         }
 
@@ -172,7 +180,8 @@ final class NavRoute {
             }
             if (end < n - 1) {
                 double a = norm180(bearingAlong(px, py, end, TURN_SPAN_M) - bearingAlong(px, py, end, -TURN_SPAN_M));
-                if (Math.abs(a) >= 20) mans.add(new int[]{pts.size() - 1, (int) Math.round(a)});
+                if (Math.abs(a) < 20) a = side[end] * 25;
+                if (a != 0) mans.add(new int[]{pts.size() - 1, (int) Math.round(a)});
             }
             start = end;
         }
