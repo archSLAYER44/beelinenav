@@ -87,16 +87,27 @@ public final class NavService extends Service implements LocationListener, Ble.L
 
     // ---------- called by the activity ----------
 
-    void navigateTo(double lat, double lon, String name) {
+    /** Fetches a route from the current position without starting navigation. */
+    void preview(double lat, double lon, String name, Router.RouteCb cb) {
+        if (last == null) {
+            cb.done(null, "Waiting for GPS");
+            return;
+        }
+        Router.route(last.getLatitude(), last.getLongitude(), lat, lon, name, cb);
+    }
+
+    /** Starts navigating a route that preview() already fetched, so no second request is made. */
+    void start(NavRoute r) {
         hasDest = true;
-        destLat = lat;
-        destLon = lon;
-        destName = name;
-        route = null;
+        destLat = r.destLat;
+        destLon = r.destLon;
+        destName = r.name;
+        route = r;
         sentSeg = -1;
-        lastRouteRequest = 0;
-        ble.sendRoute(new byte[]{0});
-        if (last != null) requestRoute(); else message = "Waiting for GPS";
+        offCount = 0;
+        message = "";
+        lastRouteRequest = SystemClock.elapsedRealtime();
+        if (last != null) tick();
         notifyUi();
     }
 

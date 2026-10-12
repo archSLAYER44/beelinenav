@@ -14,7 +14,7 @@ rm -rf build
 mkdir -p build/gen build/classes build/dex
 
 "$BT/aapt2" compile --dir res -o build/res.zip
-"$BT/aapt2" link -o build/unaligned.apk -I "$PLATFORM" --manifest AndroidManifest.xml \
+"$BT/aapt2" link -o build/unaligned.apk -I "$PLATFORM" --manifest AndroidManifest.xml -A assets \
     --java build/gen --min-sdk-version 26 --target-sdk-version 34 \
     --version-code 1 --version-name 1.0 build/res.zip
 

@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Route</title>
+<style>
+/*CSS*/
+html, body, #map { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+#close {
+  position: absolute; top: 12px; left: 12px; z-index: 5;
+  width: 40px; height: 40px; line-height: 38px; text-align: center;
+  background: #000; color: #fff; border: 1px solid #fff; border-radius: 6px;
+  font: bold 18px sans-serif;
+}
+#msg {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 8px 12px;
+  background: rgba(0,0,0,.7); color: #999; font: 12px sans-serif; display: none;
+}
+.maplibregl-ctrl-group { background: #000 !important; border: 1px solid #fff; }
+.maplibregl-ctrl-group button + button { border-top-color: #444 !important; }
+.maplibregl-ctrl button .maplibregl-ctrl-icon { filter: invert(1); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="close" onclick="Android.close()">&#x2715;</div>
+<div id="msg"></div>
+<script>
+/*JS*/
+</script>
+<script>
+(function () {
+  var D = __DATA__;
+  var msg = document.getElementById('msg');
+  function say(t) { msg.textContent = t; msg.style.display = t ? 'block' : 'none'; }
+
+  function hasWebGL() {
+    try {
+      var c = document.createElement('canvas');
+      return !!(c.getContext('webgl2') || c.getContext('webgl') || c.getContext('experimental-webgl'));
+    } catch (e) { return false; }
+  }
+  if (!window.maplibregl) { say('Map library failed to load.'); return; }
+  if (!hasWebGL()) { say('This device cannot draw the map (no WebGL).'); return; }
+  if (!D.key) { say('Map needs an Ola Maps key.'); return; }
+
+  var map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://api.olamaps.io/tiles/v1/styles/default-dark-standard/style.json',
+    attributionControl: false,
+    validateStyle: false,          // keep going if Ola's style uses something this version dislikes
+    transformRequest: function (url) {
+      if (url.indexOf('https://api.olamaps.io') === 0) {
+        url += (url.indexOf('?') >= 0 ? '&' : '?') + 'api_key=' + encodeURIComponent(D.key);
+      }
+      return { url: url };
+    }
+  });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+
+  var tileErrors = 0;
+  map.on('error', function (e) {
+    var m = e && e.error ? (e.error.message || String(e.error)) : 'map error';
+    console.log('map error: ' + m);
+    if (/401|403/.test(m)) say('Ola Maps rejected the key.');
+    else if (++tileErrors === 5) say('Some map tiles failed to load.');
+  });
+
+  map.on('load', function () {
+    var line = D.route || [];
+    if (line.length >= 2) {
+      map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: line } } });
+      map.addLayer({ id: 'route-casing', type: 'line', source: 'route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#000', 'line-width': 9 } });
+      map.addLayer({ id: 'route-line', type: 'line', source: 'route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#fff', 'line-width': 5 } });
+
+      new maplibregl.Marker({ color: '#e53935' }).setLngLat(line[line.length - 1]).addTo(map);
+      var b = new maplibregl.LngLatBounds(line[0], line[0]);
+      line.forEach(function (p) { b.extend(p); });
+      if (D.me) b.extend(D.me);
+      map.fitBounds(b, { padding: 60, maxZoom: 17, duration: 0 });
+    } else if (D.me) {
+      map.jumpTo({ center: D.me, zoom: 15 });
+    }
+    if (D.me) {
+      var dot = document.createElement('div');
+      dot.style.cssText = 'width:16px;height:16px;border-radius:50%;background:#2196f3;border:3px solid #fff;box-shadow:0 0 6px #000';
+      new maplibregl.Marker({ element: dot }).setLngLat(D.me).addTo(map);
+    }
+  });
+})();
+</script>
+</body>
+</html>

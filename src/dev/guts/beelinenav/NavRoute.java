@@ -23,6 +23,7 @@ final class NavRoute {
     private final int[] manIdx, manAngle;
     private double lat0, lon0, cos0;
 
+    int durationS;       // the service's time estimate for the whole route, seconds
     int seg;             // segment the rider is snapped to
     double progress;     // metres travelled along the route
     double offRoute;     // metres between the rider and the line
@@ -91,7 +92,9 @@ final class NavRoute {
             if (Math.abs(a) >= 20) mans.add(new int[]{first, (int) Math.round(a)});
         }
         if (pts.size() < 2) throw new JSONException("Route is too short");
-        return new NavRoute(name, destLat, destLon, pts, mans);
+        NavRoute r = new NavRoute(name, destLat, destLon, pts, mans);
+        r.durationS = (int) root.getJSONArray("routes").getJSONObject(0).optDouble("duration", 0);
+        return r;
     }
 
     /**
@@ -113,7 +116,9 @@ final class NavRoute {
 
         ArrayList<double[]> turns = new ArrayList<>();
         JSONArray legs = route.optJSONArray("legs");
+        int duration = 0;
         for (int l = 0; legs != null && l < legs.length(); l++) {
+            duration += legs.getJSONObject(l).optInt("duration", 0);
             JSONArray steps = legs.getJSONObject(l).optJSONArray("steps");
             for (int s = 0; steps != null && s < steps.length(); s++) {
                 JSONObject step = steps.getJSONObject(s);
@@ -125,7 +130,9 @@ final class NavRoute {
                 turns.add(new double[]{at.optDouble("lat"), at.optDouble("lng"), side});
             }
         }
-        return fromLine(line, turns.toArray(new double[0][]), name, destLat, destLon);
+        NavRoute r = fromLine(line, turns.toArray(new double[0][]), name, destLat, destLon);
+        r.durationS = duration;
+        return r;
     }
 
     /**
@@ -280,6 +287,19 @@ final class NavRoute {
     }
 
     double remaining() { return Math.max(0, cum[n - 1] - progress); }
+
+    double totalM() { return cum[n - 1]; }
+
+    /** The line from a segment onward as {lat, lon}, thinned evenly to at most maxPoints, for drawing on a map. */
+    double[][] outline(int fromSeg, int maxPoints) {
+        int count = n - fromSeg, keep = Math.min(count, Math.max(2, maxPoints));
+        double[][] out = new double[keep][];
+        for (int k = 0; k < keep; k++) {
+            int i = fromSeg + (int) Math.round(k * (count - 1) / (double) (keep - 1));
+            out[k] = new double[]{lat[i], lon[i]};
+        }
+        return out;
+    }
 
     /** Compass bearing of the current segment; used until GPS reports a heading. */
     double bearing() {

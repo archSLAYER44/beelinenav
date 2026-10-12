@@ -1,6 +1,8 @@
 package dev.guts.beelinenav;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -26,6 +28,7 @@ import java.util.UUID;
 final class Router {
     interface RouteCb { void done(NavRoute route, String error); }
     interface SearchCb { void done(List<Place> places, String error); }
+    interface MapCb { void done(Bitmap map, String error); }
 
     static final class Place {
         final String name;
@@ -55,6 +58,10 @@ final class Router {
 
     static boolean hasKey() {
         return !key.isEmpty();
+    }
+
+    static String key() {
+        return key;
     }
 
     static void route(double fromLat, double fromLon, double toLat, double toLon,
@@ -99,6 +106,35 @@ final class Router {
         }).start();
     }
 
+    /**
+     * One dark map picture fitted to the path ({lat, lon} points), with a pin on its last point
+     * and, if given, a marker at the rider. Needs an Ola Maps key.
+     */
+    static void mapImage(double[][] path, double[] me, MapCb cb) {
+        new Thread(() -> {
+            try {
+                StringBuilder url = new StringBuilder(OLA
+                        + "/tiles/v1/styles/default-dark-standard/static/auto/400x400@2x.png?path=");
+                for (int i = 0; i < path.length; i++) {
+                    if (i > 0) url.append("%7C");
+                    url.append(String.format(Locale.US, "%.5f,%.5f", path[i][1], path[i][0]));
+                }
+                double[] end = path[path.length - 1];
+                url.append("&stroke=white&width=4&padding=0.12");
+                url.append(String.format(Locale.US, "&marker=%.5f,%.5f%%7Cred", end[1], end[0]));
+                if (me != null) url.append(String.format(Locale.US, "&marker=%.5f,%.5f%%7Cblue", me[1], me[0]));
+                url.append("&api_key=").append(key);
+                byte[] png = requestBytes("GET", url.toString());
+                Bitmap bmp = BitmapFactory.decodeByteArray(png, 0, png.length);
+                if (bmp == null) throw new IOException("not an image");
+                MAIN.post(() -> cb.done(bmp, null));
+            } catch (Exception e) {
+                String m = e.getMessage();
+                MAIN.post(() -> cb.done(null, m == null ? "Map failed" : "Map failed: " + m));
+            }
+        }).start();
+    }
+
     private static List<Place> searchOla(String query, double nearLat, double nearLon) throws Exception {
         String url = OLA + "/places/v1/autocomplete?input=" + URLEncoder.encode(query, "UTF-8");
         if (!Double.isNaN(nearLat)) url += String.format(Locale.US, "&location=%.6f,%.6f", nearLat, nearLon);
@@ -133,6 +169,10 @@ final class Router {
 
     // Errors thrown here never include the URL, because it carries the API key.
     private static String request(String method, String url) throws IOException {
+        return new String(requestBytes(method, url), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static byte[] requestBytes(String method, String url) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         try {
             c.setConnectTimeout(10000);
@@ -153,7 +193,7 @@ final class Router {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buf = new byte[8192];
                 for (int k; (k = in.read(buf)) > 0; ) out.write(buf, 0, k);
-                return out.toString("UTF-8");
+                return out.toByteArray();
             }
         } finally {
             c.disconnect();

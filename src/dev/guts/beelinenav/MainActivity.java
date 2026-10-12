@@ -21,6 +21,7 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -40,7 +41,9 @@ public final class MainActivity extends Activity implements NavService.Listener 
     private TextView status, speedView, turnView, destView;
     private EditText input;
     private LinearLayout results;
-    private TextView stopBtn, keyBtn;
+    private TextView stopBtn, keyBtn, mapBtn;
+    private LinearLayout dash, navRow;
+    private int panelGen;          // bumped whenever the panel changes, so late replies are dropped
 
     @Override
     protected void onCreate(Bundle saved) {
@@ -144,7 +147,8 @@ public final class MainActivity extends Activity implements NavService.Listener 
             turnView.setText("No destination");
             destView.setText("");
         }
-        stopBtn.setVisibility(s.hasDest ? View.VISIBLE : View.GONE);
+        navRow.setVisibility(s.hasDest ? View.VISIBLE : View.GONE);
+        mapBtn.setVisibility(r != null && Router.hasKey() ? View.VISIBLE : View.GONE);
     }
 
     private static String turnText(int a) {
@@ -172,13 +176,15 @@ public final class MainActivity extends Activity implements NavService.Listener 
 
         Matcher m = LAT_LON.matcher(q);
         if (m.matches()) {
-            s.navigateTo(Double.parseDouble(m.group(1)), Double.parseDouble(m.group(2)), q);
+            openPreview(Double.parseDouble(m.group(1)), Double.parseDouble(m.group(2)), q);
             return;
         }
         showMessage("Searching");
         double lat = s.last == null ? Double.NaN : s.last.getLatitude();
         double lon = s.last == null ? Double.NaN : s.last.getLongitude();
+        int gen = panelGen;
         Router.search(q, lat, lon, (places, err) -> {
+            if (gen != panelGen) return;
             results.removeAllViews();
             if (places == null) {
                 showMessage(err);
@@ -197,21 +203,101 @@ public final class MainActivity extends Activity implements NavService.Listener 
         t.setEllipsize(TextUtils.TruncateAt.END);
         t.setBackground(underline());
         t.setOnClickListener(v -> {
-            NavService s = NavService.instance;
-            if (s == null) return;
-            results.removeAllViews();
-            input.setText("");
             int comma = p.name.indexOf(',');
-            s.navigateTo(p.lat, p.lon, comma > 0 ? p.name.substring(0, comma) : p.name);
+            openPreview(p.lat, p.lon, comma > 0 ? p.name.substring(0, comma) : p.name);
         });
         return t;
     }
 
-    private void showMessage(String m) {
+    private void clearPanel() {
+        panelGen++;
         results.removeAllViews();
+        dash.setVisibility(View.VISIBLE);
+    }
+
+    private void showMessage(String m) {
+        clearPanel();
         TextView t = text(m, 14, GREY);
         t.setPadding(0, dp(14), 0, 0);
         results.addView(t);
+    }
+
+    // ---------- route preview and map ----------
+
+    private void openPreview(double lat, double lon, String name) {
+        NavService s = NavService.instance;
+        if (s == null) return;
+        showMessage("Finding route");
+        int gen = panelGen;
+        s.preview(lat, lon, name, (r, err) -> {
+            if (gen != panelGen) return;
+            if (r == null) showMessage(err); else showPanel(r, true);
+        });
+    }
+
+    /** Map picture of the route, with START / CANCEL before riding or CLOSE while riding. */
+    private void showPanel(NavRoute r, boolean preview) {
+        NavService s = NavService.instance;
+        if (s == null) return;
+        clearPanel();
+        dash.setVisibility(View.GONE);
+        int gen = panelGen;
+        int from = preview ? 0 : r.seg;
+        double[] me = s.last == null ? null : new double[]{s.last.getLatitude(), s.last.getLongitude()};
+
+        ImageView map = new ImageView(this);
+        map.setAdjustViewBounds(true);
+        map.setVisibility(View.GONE);
+        results.addView(map, new LinearLayout.LayoutParams(-1, -2));
+        TextView mapMsg = text(Router.hasKey() ? "Loading map" : "Map needs an Ola Maps key", 12, GREY);
+        mapMsg.setLetterSpacing(0.2f);
+        mapMsg.setPadding(0, dp(10), 0, dp(10));
+        results.addView(mapMsg);
+        if (Router.hasKey()) {
+            Router.mapImage(r.outline(from, 80), me, (bmp, err) -> {
+                if (gen != panelGen) return;
+                if (bmp == null) {
+                    mapMsg.setText(err);
+                    return;
+                }
+                map.setImageBitmap(bmp);
+                map.setVisibility(View.VISIBLE);
+                mapMsg.setText("TAP MAP TO ZOOM");
+            });
+            map.setOnClickListener(v -> startActivity(MapActivity.intent(this, r.outline(from, 500), me)));
+        }
+
+        TextView name = text(r.name, 20, Color.WHITE);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        results.addView(name);
+        String info = preview ? dist(r.totalM()) + "  ·  " + time(r.durationS) : dist(r.remaining()) + " left";
+        TextView infoView = text(info, 14, GREY);
+        infoView.setPadding(0, dp(4), 0, dp(16));
+        results.addView(infoView);
+
+        LinearLayout row = new LinearLayout(this);
+        if (preview) {
+            TextView start = button("START");
+            start.setOnClickListener(v -> {
+                NavService svc = NavService.instance;
+                if (svc == null) return;
+                input.setText("");
+                clearPanel();
+                svc.start(r);
+            });
+            row.addView(start, new LinearLayout.LayoutParams(0, -2, 1));
+        }
+        TextView close = button(preview ? "CANCEL" : "CLOSE");
+        close.setOnClickListener(v -> clearPanel());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(preview ? -2 : -1, -2);
+        if (preview) lp.leftMargin = dp(12);
+        row.addView(close, lp);
+        results.addView(row, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private static String time(int seconds) {
+        int m = Math.max(1, Math.round(seconds / 60f));
+        return m < 60 ? m + " min" : m / 60 + " h " + m % 60 + " min";
     }
 
     // ---------- map key ----------
@@ -290,26 +376,30 @@ public final class MainActivity extends Activity implements NavService.Listener 
         status.setPadding(0, dp(4), 0, 0);
         root.addView(status);
 
+        dash = new LinearLayout(this);
+        dash.setOrientation(LinearLayout.VERTICAL);
+        root.addView(dash, new LinearLayout.LayoutParams(-1, -2));
+
         speedView = text("--", 112, Color.WHITE);
         speedView.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
         speedView.setGravity(Gravity.CENTER);
         speedView.setIncludeFontPadding(false);
         speedView.setPadding(0, dp(28), 0, 0);
-        root.addView(speedView, new LinearLayout.LayoutParams(-1, -2));
+        dash.addView(speedView, new LinearLayout.LayoutParams(-1, -2));
 
         TextView unit = text("KM/H", 13, GREY);
         unit.setLetterSpacing(0.3f);
         unit.setGravity(Gravity.CENTER);
-        root.addView(unit, new LinearLayout.LayoutParams(-1, -2));
+        dash.addView(unit, new LinearLayout.LayoutParams(-1, -2));
 
         turnView = text("No destination", 24, Color.WHITE);
         turnView.setTypeface(Typeface.DEFAULT_BOLD);
         turnView.setPadding(0, dp(32), 0, 0);
-        root.addView(turnView);
+        dash.addView(turnView);
 
         destView = text("", 14, GREY);
         destView.setPadding(0, dp(4), 0, dp(20));
-        root.addView(destView);
+        dash.addView(destView);
 
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -342,13 +432,25 @@ public final class MainActivity extends Activity implements NavService.Listener 
         scroll.addView(results);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
+        navRow = new LinearLayout(this);
+        navRow.setVisibility(View.GONE);
+        navRow.setPadding(0, dp(12), 0, 0);
+        mapBtn = button("MAP");
+        mapBtn.setOnClickListener(v -> {
+            NavService s = NavService.instance;
+            if (s != null && s.route != null) showPanel(s.route, false);
+        });
+        LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(-2, -2);
+        mapLp.rightMargin = dp(12);
+        navRow.addView(mapBtn, mapLp);
         stopBtn = button("STOP NAVIGATION");
-        stopBtn.setVisibility(View.GONE);
         stopBtn.setOnClickListener(v -> {
             NavService s = NavService.instance;
+            clearPanel();
             if (s != null) s.stopNav();
         });
-        root.addView(stopBtn, new LinearLayout.LayoutParams(-1, -2));
+        navRow.addView(stopBtn, new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(navRow, new LinearLayout.LayoutParams(-1, -2));
         return root;
     }
 
