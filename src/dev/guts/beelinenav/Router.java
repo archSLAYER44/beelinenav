@@ -1,5 +1,6 @@
 package dev.guts.beelinenav;
 
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -18,8 +19,9 @@ import java.util.Locale;
 import java.util.UUID;
 
 /**
- * Routes and place search. Uses Ola Maps when the build has a key (ola_key.txt), otherwise the
- * free OpenStreetMap services (OSRM, Nominatim). Callbacks run on the main thread.
+ * Routes and place search. Uses Ola Maps when a key has been set (pasted in the app, or compiled
+ * in from ola_key.txt), otherwise the free OpenStreetMap services (OSRM, Nominatim).
+ * Callbacks run on the main thread.
  */
 final class Router {
     interface RouteCb { void done(NavRoute route, String error); }
@@ -38,18 +40,33 @@ final class Router {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final String AGENT = "BeelineNav/1.0 (personal ESP32 bike display)";
     private static final String OLA = "https://api.olamaps.io";
-    private static final boolean USE_OLA = !Secrets.OLA_KEY.isEmpty();
+    private static volatile String key = Secrets.OLA_KEY;
+
+    /** Loads the key the user pasted in the app; a key compiled in from ola_key.txt is the fallback. */
+    static void loadKey(Context ctx) {
+        String saved = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("ola_key", "");
+        key = saved.isEmpty() ? Secrets.OLA_KEY : saved;
+    }
+
+    static void saveKey(Context ctx, String k) {
+        ctx.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("ola_key", k.trim()).apply();
+        loadKey(ctx);
+    }
+
+    static boolean hasKey() {
+        return !key.isEmpty();
+    }
 
     static void route(double fromLat, double fromLon, double toLat, double toLon,
                       String name, RouteCb cb) {
         new Thread(() -> {
             try {
                 NavRoute r;
-                if (USE_OLA) {
+                if (hasKey()) {
                     String url = String.format(Locale.US,
                             OLA + "/routing/v1/directions?origin=%.6f,%.6f&destination=%.6f,%.6f"
                                     + "&steps=true&overview=full&api_key=%s",
-                            fromLat, fromLon, toLat, toLon, Secrets.OLA_KEY);
+                            fromLat, fromLon, toLat, toLon, key);
                     r = NavRoute.fromOla(new JSONObject(request("POST", url)), name, toLat, toLon);
                 } else {
                     String url = String.format(Locale.US,
@@ -72,7 +89,7 @@ final class Router {
     static void search(String query, double nearLat, double nearLon, SearchCb cb) {
         new Thread(() -> {
             try {
-                List<Place> out = USE_OLA ? searchOla(query, nearLat, nearLon)
+                List<Place> out = hasKey() ? searchOla(query, nearLat, nearLon)
                         : searchOsm(query, nearLat, nearLon);
                 MAIN.post(() -> cb.done(out, null));
             } catch (Exception e) {
@@ -85,7 +102,7 @@ final class Router {
     private static List<Place> searchOla(String query, double nearLat, double nearLon) throws Exception {
         String url = OLA + "/places/v1/autocomplete?input=" + URLEncoder.encode(query, "UTF-8");
         if (!Double.isNaN(nearLat)) url += String.format(Locale.US, "&location=%.6f,%.6f", nearLat, nearLon);
-        url += "&api_key=" + Secrets.OLA_KEY;
+        url += "&api_key=" + key;
         JSONArray a = new JSONObject(request("GET", url)).optJSONArray("predictions");
         List<Place> out = new ArrayList<>();
         for (int i = 0; a != null && i < a.length(); i++) {

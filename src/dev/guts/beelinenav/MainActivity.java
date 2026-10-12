@@ -2,6 +2,7 @@ package dev.guts.beelinenav;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
@@ -39,13 +40,14 @@ public final class MainActivity extends Activity implements NavService.Listener 
     private TextView status, speedView, turnView, destView;
     private EditText input;
     private LinearLayout results;
-    private TextView stopBtn;
+    private TextView stopBtn, keyBtn;
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         getWindow().setStatusBarColor(Color.BLACK);
         getWindow().setNavigationBarColor(Color.BLACK);
+        Router.loadKey(this);
         setContentView(buildUi());
         askPermissions();
     }
@@ -212,6 +214,42 @@ public final class MainActivity extends Activity implements NavService.Listener 
         results.addView(t);
     }
 
+    // ---------- map key ----------
+
+    private void showKeyState() {
+        keyBtn.setText(Router.hasKey() ? "OLA MAPS" : "ADD MAP KEY");
+        keyBtn.setTextColor(Router.hasKey() ? Color.WHITE : GREY);
+    }
+
+    /** Lets the user paste their own Ola Maps key; it is stored on the phone only. */
+    private void askKey() {
+        EditText field = new EditText(this);
+        field.setHint("Paste Ola Maps API key");
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(field, new LinearLayout.LayoutParams(-1, -2));
+        new AlertDialog.Builder(this)
+                .setTitle("Ola Maps key")
+                .setMessage(Router.hasKey()
+                        ? "A key is saved. Paste a new one to replace it, or remove it to use OpenStreetMap."
+                        : "Without a key the app uses OpenStreetMap for routes and search.")
+                .setView(box)
+                .setPositiveButton("Save", (d, w) -> {
+                    String k = field.getText().toString().trim();
+                    if (k.isEmpty()) return;
+                    Router.saveKey(this, k);
+                    showKeyState();
+                })
+                .setNeutralButton("Remove", (d, w) -> {
+                    Router.saveKey(this, "");
+                    showKeyState();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void hideKeyboard() {
         InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         imm.hideSoftInputFromWindow(input.getWindowToken(), 0);
@@ -232,6 +270,12 @@ public final class MainActivity extends Activity implements NavService.Listener 
         title.setLetterSpacing(0.3f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        keyBtn = text("", 12, GREY);
+        keyBtn.setLetterSpacing(0.3f);
+        keyBtn.setPadding(dp(12), dp(8), dp(8), dp(8));
+        keyBtn.setOnClickListener(v -> askKey());
+        top.addView(keyBtn);
+        showKeyState();
         TextView quit = text("QUIT", 12, GREY);
         quit.setLetterSpacing(0.3f);
         quit.setPadding(dp(12), dp(8), 0, dp(8));

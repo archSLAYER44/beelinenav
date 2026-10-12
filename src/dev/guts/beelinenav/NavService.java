@@ -47,6 +47,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     public void onCreate() {
         super.onCreate();
         instance = this;
+        Router.loadKey(this);
         goForeground();
         ble = new Ble(this, this);
         ble.start();
