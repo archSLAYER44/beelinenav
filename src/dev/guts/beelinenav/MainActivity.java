@@ -51,16 +51,15 @@ public final class MainActivity extends CardActivity implements NavService.Liste
     private View bleTile, gpsTile;
     private TextView bleText, gpsText, notice, callText;
     private LinearLayout callCard;
-    // hero card: minutes to arrive while riding, the clock otherwise
-    private TextView heroLabel, heroHint, heroBig, heroBadge, clockText, arriveText, leftText;
-    private LinearLayout heroTimes, progressBar;
+    // hero card: the next turn while riding, "No destination" otherwise; the clock sits small in the corner
+    private TextView heroLabel, heroHint, heroArrow, heroBig, heroBadge, heroSub, clockText;
+    private LinearLayout heroRow;
+    // trip card: destination, arrive / time left / distance left, progress, Map and Stop
+    private LinearLayout tripCard, tripStats, progressBar;
     private View progressFill, progressRest;
-    // turn card and destination card
-    private LinearLayout turnCard, destCard;
-    private TextView turnArrow, turnBig, turnSub, statSpeed, statTrip, statDone;
-    private TextView destName, destSub, mapBtn;
+    private TextView destName, destSub, arriveText, timeLeftText, leftText, mapBtn;
     private EditText input;
-    private LinearLayout dash, favRow, results;
+    private LinearLayout dash, searchCard, favRow, results, recentsCard;
     private int panelGen;          // bumped whenever the panel changes, so late replies are dropped
     private String pendingShare;      // a place another app shared, until there is a position to route from
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -182,7 +181,7 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         String ble = s.ble.state;
         boolean linked = ble.startsWith("Display connected");
         boolean busy = ble.startsWith("Searching") || ble.startsWith("Connecting");
-        tint(bleTile, linked ? fg : busy ? grey : chip);
+        tint(bleTile, linked ? fg : busy ? grey : dotOff());
         ble = ble.replace("Searching for display", "Searching").replace("Display ", "")
                 .replace("Bluetooth is off", "Bluetooth off").replace("Bluetooth permission missing", "No permission");
         ble = Character.toUpperCase(ble.charAt(0)) + ble.substring(1);
@@ -195,10 +194,10 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         int gpsColor;
         if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
             gps = "Location is off";
-            gpsColor = chip;
+            gpsColor = dotOff();
         } else if (s.last == null) {
             gps = "Waiting for a fix";
-            gpsColor = chip;
+            gpsColor = dotOff();
         } else {
             boolean fine = LocationManager.GPS_PROVIDER.equals(s.last.getProvider());
             boolean stale = s.fixAgeS() >= 10;                      // GPS gone quiet
@@ -218,65 +217,59 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         String kmh = s.last == null ? "" : Math.round(s.speed * 3.6f) + " km/h";
         NavRoute r = s.route;
 
-        // hero card: the clock stays small in the corner; the body is the arrival while riding
+        // hero card: the next turn while riding, so the most important thing is always at the top
         clockText.setText(clock(nowMs));
         heroBadge.setText(kmh);
-        heroBadge.setVisibility(kmh.isEmpty() ? View.GONE : View.VISIBLE);
+        heroBadge.setVisibility(r == null || kmh.isEmpty() ? View.GONE : View.VISIBLE);
         if (r != null) {
-            int secs = r.remainingTimeS();
-            heroLabel.setText("Arrival in");
+            boolean off = r.offRoute > NavService.OFF_ROUTE_M;
+            heroLabel.setText(off ? "Off route" : r.turnAngle == NavRoute.ARRIVE ? "Destination" : "Next turn");
             heroLabel.setTextSize(12);
-            heroLabel.setTextColor(inkGrey);
-            heroLabel.setTypeface(Typeface.DEFAULT);
-            heroBig.setText(secs >= 3600
-                    ? units(String.valueOf(secs / 3600), "h ", String.format(Locale.US, "%02d", secs % 3600 / 60), "min")
-                    : units(String.valueOf(Math.max(1, Math.round(secs / 60f))), "min"));
-            heroBig.setVisibility(View.VISIBLE);
+            heroLabel.setTextColor(off ? Color.WHITE : inkGrey);
+            heroLabel.setTypeface(off ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            heroArrow.setText(arrow(r.turnAngle));
+            String[] dist = splitUnit(NavRoute.distText(r.distToTurn));
+            heroBig.setText(units(dist[0], dist[1]));
+            String onto = NavRoute.ontoText(r.turnAngle, r.turnName);
+            heroSub.setText(NavRoute.turnText(r.turnAngle) + (onto.isEmpty() ? "" : " " + onto));
+            heroRow.setVisibility(View.VISIBLE);
+            heroSub.setVisibility(View.VISIBLE);
             heroHint.setVisibility(View.GONE);
-            heroTimes.setVisibility(View.VISIBLE);
-            arriveText.setText(clock(nowMs + secs * 1000L));
-            leftText.setText(NavRoute.distText(r.remaining()));
-            progressBar.setVisibility(View.VISIBLE);
-            setProgress(r.totalM() > 0 ? (float) (r.progress / r.totalM()) : 0);
         } else {
             heroLabel.setText(!s.message.isEmpty() ? s.message : s.hasDest ? "Finding route" : "No destination");
             heroLabel.setTextSize(17);
             heroLabel.setTextColor(Color.WHITE);
             heroLabel.setTypeface(MEDIUM);
-            heroBig.setVisibility(View.GONE);
-            heroHint.setVisibility(View.VISIBLE);
-            heroTimes.setVisibility(View.GONE);
-            progressBar.setVisibility(View.GONE);
+            heroRow.setVisibility(View.GONE);
+            heroSub.setVisibility(View.GONE);
+            heroHint.setVisibility(s.hasDest ? View.GONE : View.VISIBLE);
         }
 
-        // turn card
-        if (r != null) {
-            turnCard.setVisibility(View.VISIBLE);
-            turnArrow.setText(arrow(r.turnAngle));
-            String[] dist = splitUnit(NavRoute.distText(r.distToTurn));
-            turnBig.setText(units(dist[0], dist[1]));
-            boolean off = r.offRoute > NavService.OFF_ROUTE_M;
-            String onto = NavRoute.ontoText(r.turnAngle, r.turnName);
-            turnSub.setText(off ? "Off route" : NavRoute.turnText(r.turnAngle) + (onto.isEmpty() ? "" : " " + onto));
-            turnSub.setTextColor(off ? fg : grey);
-            turnSub.setTypeface(off ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            statSpeed.setText(kmh.isEmpty() ? "--" : kmh);
-            statTrip.setText(NavRoute.distText(r.totalM()));
-            statDone.setText(r.totalM() > 0 ? Math.round(100 * Math.max(0, Math.min(1, r.progress / r.totalM()))) + "%" : "--");
-        } else {
-            turnCard.setVisibility(View.GONE);
-        }
-
-        // destination card
+        // trip card: one place for where we are going and how far it still is
         if (s.hasDest) {
-            destCard.setVisibility(View.VISIBLE);
+            tripCard.setVisibility(View.VISIBLE);
             destName.setText(s.destName);
-            destSub.setText(r == null ? s.message
-                    : s.message.isEmpty() ? NavRoute.distText(r.remaining()) + " left" : s.message);
+            destSub.setText(s.message);
+            destSub.setVisibility(s.message.isEmpty() ? View.GONE : View.VISIBLE);
+            if (r != null) {
+                int secs = r.remainingTimeS();
+                arriveText.setText(clock(nowMs + secs * 1000L));
+                timeLeftText.setText(time(secs));
+                leftText.setText(NavRoute.distText(r.remaining()));
+                setProgress(r.totalM() > 0 ? (float) (r.progress / r.totalM()) : 0);
+            }
+            tripStats.setVisibility(r != null ? View.VISIBLE : View.GONE);
+            progressBar.setVisibility(r != null ? View.VISIBLE : View.GONE);
             mapBtn.setVisibility(r != null && Router.hasMap() ? View.VISIBLE : View.GONE);
         } else {
-            destCard.setVisibility(View.GONE);
+            tripCard.setVisibility(View.GONE);
         }
+
+        // search, Home / Work and recent places are for planning; while riding they only get in the way
+        int planning = s.hasDest ? View.GONE : View.VISIBLE;
+        searchCard.setVisibility(planning);
+        favRow.setVisibility(planning);
+        if (recentsCard != null) recentsCard.setVisibility(planning);
     }
 
     private String clock(long ms) {
@@ -316,6 +309,11 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         ((LinearLayout.LayoutParams) progressFill.getLayoutParams()).weight = f;
         ((LinearLayout.LayoutParams) progressRest.getLayoutParams()).weight = 1 - f;
         progressBar.requestLayout();
+    }
+
+    /** Status dot for "off": light enough to read as off, dark enough to see on the card. */
+    private int dotOff() {
+        return light ? 0xFFCFCFCF : 0xFF4A4A4A;
     }
 
     private static void tint(View v, int color) {
@@ -397,9 +395,11 @@ public final class MainActivity extends CardActivity implements NavService.Liste
 
     /** The last destinations: one tap routes there again; hold one to make it Home or Work, or forget it. */
     private void showRecents() {
+        recentsCard = null;
         List<Router.Place> recent = Recents.list(this);
         if (recent.isEmpty()) return;
         LinearLayout list = card(card);
+        recentsCard = list;
         list.addView(label("Recent"));
         for (int i = 0; i < recent.size(); i++) {
             Router.Place p = recent.get(i);
@@ -666,17 +666,23 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         top.addView(quit, beside(8));
         root.addView(top);
 
-        // status row: the display link and the GPS fix
-        LinearLayout statusRow = new LinearLayout(this);
-        bleTile = square(chip, 34, 11);
-        bleText = text("Starting", 12, grey);
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, -2, 1);
-        half.rightMargin = dp(12);
-        statusRow.addView(statusCard("Display", bleTile, bleText), half);
-        gpsTile = square(chip, 34, 11);
-        gpsText = text("Waiting for a fix", 12, grey);
-        statusRow.addView(statusCard("GPS", gpsTile, gpsText), new LinearLayout.LayoutParams(0, -2, 1));
-        root.addView(statusRow, stack(12));
+        // status strip: one slim card with a dot for the display link and one for the GPS fix
+        LinearLayout status = card(card);
+        status.setOrientation(LinearLayout.HORIZONTAL);
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        status.setPadding(dp(16), dp(12), dp(16), dp(12));
+        bleTile = square(chip, 8, 99);
+        bleText = text("Starting", 13, grey);
+        status.addView(statusHalf("Display", bleTile, bleText), new LinearLayout.LayoutParams(0, -2, 1));
+        View divider = new View(this);
+        divider.setBackgroundColor(line);
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(dp(1), dp(18));
+        divLp.leftMargin = divLp.rightMargin = dp(12);
+        status.addView(divider, divLp);
+        gpsTile = square(chip, 8, 99);
+        gpsText = text("Waiting for a fix", 13, grey);
+        status.addView(statusHalf("GPS", gpsTile, gpsText), new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(status, stack(12));
 
         notice = text("", 13, fg);
         notice.setPadding(dp(8), 0, dp(8), dp(12));
@@ -696,12 +702,11 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         dash = new LinearLayout(this);
         dash.setOrientation(LinearLayout.VERTICAL);
         dash.addView(heroCard(), stack(12));
-        dash.addView(turnCard(), stack(12));
-        dash.addView(destCard(), stack(12));
+        dash.addView(tripCard(), stack(12));
         root.addView(dash, new LinearLayout.LayoutParams(-1, -2));
 
         // search card
-        LinearLayout searchCard = card(card);
+        searchCard = card(card);
         searchCard.setOrientation(LinearLayout.HORIZONTAL);
         searchCard.setGravity(Gravity.CENTER_VERTICAL);
         searchCard.setPadding(dp(20), dp(8), dp(8), dp(8));
@@ -748,10 +753,10 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         return scroll;
     }
 
-    /** Dark card with a small clock in the corner: minutes to arrive, arrive time and a progress bar while riding. */
+    /** Dark card with a small clock in the corner: the next turn (arrow, distance, road) and the speed while riding. */
     private LinearLayout heroCard() {
         LinearLayout hero = card(ink);
-        hero.setClipToPadding(false);     // the progress bar sits in the padding strip at the bottom
+        hero.setPadding(dp(20), dp(18), dp(20), dp(20));
 
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
@@ -763,142 +768,110 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         head.addView(clockText, beside(12));
         hero.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        heroHint = text("Search below, or tap Home, Work or a recent place", 12, inkGrey);
+        heroHint = text("Search below, or tap Home, Work or a recent place", 13, inkGrey);
         heroHint.setPadding(0, dp(4), 0, 0);
-        row.addView(heroHint, new LinearLayout.LayoutParams(0, -2, 1));
+        hero.addView(heroHint);
+
+        heroRow = new LinearLayout(this);
+        heroRow.setGravity(Gravity.CENTER_VERTICAL);
+        heroRow.setPadding(0, dp(10), 0, 0);
+        heroArrow = text("", 44, Color.WHITE);
+        heroArrow.setTypeface(Typeface.DEFAULT_BOLD);
+        heroArrow.setIncludeFontPadding(false);
+        heroArrow.setPadding(0, 0, dp(12), 0);
+        heroRow.addView(heroArrow);
         heroBig = text("", 54, Color.WHITE);
         heroBig.setTypeface(Typeface.DEFAULT_BOLD);
         heroBig.setLetterSpacing(-0.03f);
         heroBig.setIncludeFontPadding(false);
-        heroBig.setPadding(0, dp(8), 0, 0);
-        heroBig.setVisibility(View.GONE);
-        row.addView(heroBig, new LinearLayout.LayoutParams(0, -2, 1));
+        heroRow.addView(heroBig, new LinearLayout.LayoutParams(0, -2, 1));
         heroBadge = tag("", Color.BLACK);
         heroBadge.setBackground(rounded(Color.WHITE, 999));
-        heroBadge.setVisibility(View.GONE);
-        row.addView(heroBadge, beside(8));
-        hero.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        heroRow.addView(heroBadge, beside(8));
+        heroRow.setVisibility(View.GONE);
+        hero.addView(heroRow, new LinearLayout.LayoutParams(-1, -2));
 
-        heroTimes = new LinearLayout(this);
-        heroTimes.setGravity(Gravity.CENTER_VERTICAL);
-        heroTimes.setPadding(0, dp(18), 0, 0);
-        arriveText = text("", 16, Color.WHITE);
-        arriveText.setTypeface(Typeface.DEFAULT_BOLD);
-        heroTimes.addView(stat("Arrive", arriveText, inkGrey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
-        leftText = text("", 16, Color.WHITE);
-        leftText.setTypeface(Typeface.DEFAULT_BOLD);
-        heroTimes.addView(stat("Distance left", leftText, inkGrey, Gravity.END), new LinearLayout.LayoutParams(0, -2, 1));
-        heroTimes.setVisibility(View.GONE);
-        hero.addView(heroTimes, new LinearLayout.LayoutParams(-1, -2));
-
-        // progress bar along the bottom edge of the card (negative margins reach past the padding)
-        progressBar = new LinearLayout(this);
-        progressFill = new View(this);
-        progressFill.setBackgroundColor(Color.WHITE);
-        progressBar.addView(progressFill, new LinearLayout.LayoutParams(0, -1, 0f));
-        progressRest = new View(this);
-        progressRest.setBackgroundColor(inkChip);
-        progressBar.addView(progressRest, new LinearLayout.LayoutParams(0, -1, 1f));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(6));
-        lp.topMargin = dp(18);
-        lp.leftMargin = lp.rightMargin = lp.bottomMargin = -dp(18);
-        progressBar.setVisibility(View.GONE);
-        hero.addView(progressBar, lp);
+        heroSub = text("", 15, 0xFFDDDDDD);
+        heroSub.setPadding(0, dp(8), 0, 0);
+        heroSub.setMaxLines(2);
+        heroSub.setEllipsize(TextUtils.TruncateAt.END);
+        heroSub.setVisibility(View.GONE);
+        hero.addView(heroSub);
         return hero;
     }
 
-    /** Next turn: arrow and distance, the road it leads onto, then speed / trip length / share done. */
-    private LinearLayout turnCard() {
-        turnCard = card(card);
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        turnArrow = text("←", 40, fg);
-        turnArrow.setTypeface(Typeface.DEFAULT_BOLD);
-        turnArrow.setIncludeFontPadding(false);
-        turnArrow.setPadding(0, 0, dp(10), 0);
-        row.addView(turnArrow);
-        turnBig = text("", 44, fg);
-        turnBig.setTypeface(Typeface.DEFAULT_BOLD);
-        turnBig.setLetterSpacing(-0.03f);
-        turnBig.setIncludeFontPadding(false);
-        row.addView(turnBig);
-        turnCard.addView(row, new LinearLayout.LayoutParams(-1, -2));
-        turnSub = text("", 14, grey);
-        turnSub.setPadding(0, dp(6), 0, 0);
-        turnSub.setMaxLines(2);
-        turnSub.setEllipsize(TextUtils.TruncateAt.END);
-        turnCard.addView(turnSub);
-        LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(-1, dp(1));
-        lineLp.topMargin = dp(16);
-        lineLp.bottomMargin = dp(14);
-        turnCard.addView(hline(), lineLp);
-        LinearLayout stats = new LinearLayout(this);
-        statSpeed = value();
-        stats.addView(stat("Speed", statSpeed, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
-        statTrip = value();
-        stats.addView(stat("Trip", statTrip, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
-        statDone = value();
-        stats.addView(stat("Done", statDone, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
-        turnCard.addView(stats, new LinearLayout.LayoutParams(-1, -2));
-        turnCard.setVisibility(View.GONE);
-        return turnCard;
-    }
-
-    /** Where we are going, with MAP and STOP. */
-    private LinearLayout destCard() {
-        destCard = card(card);
-        destCard.addView(label("Destination"));
+    /** Where we are going: name, arrive / time left / distance left, a progress bar, then Map and Stop. */
+    private LinearLayout tripCard() {
+        tripCard = card(card);
+        tripCard.setPadding(dp(20), dp(18), dp(20), dp(20));
+        tripCard.addView(label("Destination"));
         destName = text("", 18, fg);
         destName.setTypeface(Typeface.DEFAULT_BOLD);
         destName.setPadding(0, dp(4), 0, 0);
         destName.setMaxLines(2);
         destName.setEllipsize(TextUtils.TruncateAt.END);
-        destCard.addView(destName);
+        tripCard.addView(destName);
         destSub = text("", 13, grey);
         destSub.setPadding(0, dp(2), 0, 0);
-        destCard.addView(destSub);
+        tripCard.addView(destSub);
+
+        tripStats = new LinearLayout(this);
+        tripStats.setPadding(0, dp(16), 0, 0);
+        arriveText = value();
+        tripStats.addView(stat("Arrive", arriveText, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
+        timeLeftText = value();
+        tripStats.addView(stat("Time left", timeLeftText, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
+        leftText = value();
+        tripStats.addView(stat("Distance", leftText, grey, Gravity.END), new LinearLayout.LayoutParams(0, -2, 1));
+        tripCard.addView(tripStats, new LinearLayout.LayoutParams(-1, -2));
+
+        // thin rounded progress bar
+        progressBar = new LinearLayout(this);
+        progressBar.setBackground(rounded(chip, 99));
+        progressBar.setClipToOutline(true);
+        progressFill = new View(this);
+        progressFill.setBackground(rounded(fg, 99));
+        progressBar.addView(progressFill, new LinearLayout.LayoutParams(0, -1, 0f));
+        progressRest = new View(this);
+        progressBar.addView(progressRest, new LinearLayout.LayoutParams(0, -1, 1f));
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(-1, dp(6));
+        barLp.topMargin = dp(14);
+        tripCard.addView(progressBar, barLp);
+
         LinearLayout row = new LinearLayout(this);
-        row.setPadding(0, dp(16), 0, 0);
+        row.setPadding(0, dp(18), 0, 0);
         mapBtn = pill("Map", chip, fg);
         mapBtn.setOnClickListener(v -> {
             NavService s = NavService.instance;
             if (s != null && s.route != null) showPanel(s.route, false);
         });
-        LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(-2, -2);
+        LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(0, -2, 1);
         mapLp.rightMargin = dp(10);
         row.addView(mapBtn, mapLp);
-        TextView stop = pill("Stop navigation", fg, bg);
+        TextView stop = pill("Stop", fg, bg);
         stop.setOnClickListener(v -> {
             NavService s = NavService.instance;
             clearPanel();
             if (s != null) s.stopNav();
         });
         row.addView(stop, new LinearLayout.LayoutParams(0, -2, 1));
-        destCard.addView(row, new LinearLayout.LayoutParams(-1, -2));
-        destCard.setVisibility(View.GONE);
-        return destCard;
+        tripCard.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        tripCard.setVisibility(View.GONE);
+        return tripCard;
     }
 
-    /** Small card with a coloured square, a title and a one-line state under it. */
-    private LinearLayout statusCard(String title, View tile, TextView state) {
-        LinearLayout c = card(card);
-        c.setOrientation(LinearLayout.HORIZONTAL);
-        c.setGravity(Gravity.CENTER_VERTICAL);
-        c.setPadding(dp(14), dp(14), dp(14), dp(14));
-        c.addView(tile, new LinearLayout.LayoutParams(dp(34), dp(34)));
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(12), 0, 0, 0);
+    /** One half of the status strip: a dot, the name and its state on one line. */
+    private LinearLayout statusHalf(String title, View dot, TextView state) {
+        LinearLayout h = new LinearLayout(this);
+        h.setGravity(Gravity.CENTER_VERTICAL);
+        h.addView(dot, new LinearLayout.LayoutParams(dp(8), dp(8)));
         TextView t = text(title, 13, fg);
         t.setTypeface(MEDIUM);
-        col.addView(t);
+        t.setPadding(dp(8), 0, dp(6), 0);
+        h.addView(t);
         state.setMaxLines(1);
         state.setEllipsize(TextUtils.TruncateAt.END);
-        state.setPadding(0, dp(2), 0, 0);
-        col.addView(state);
-        c.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
-        return c;
+        h.addView(state, new LinearLayout.LayoutParams(0, -2, 1));
+        return h;
     }
 }
