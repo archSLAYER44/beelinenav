@@ -71,7 +71,7 @@ final class Roads {
                         String[] zxy = key.split("/");
                         byte[] tile = Router.fetch(String.format(Locale.US,
                                 "https://api.olamaps.io/tiles/v1/data/planet/%s/%s/%s.pbf?api_key=%s",
-                                zxy[0], zxy[1], zxy[2], Router.key()));
+                                zxy[0], zxy[1], zxy[2], Router.olaKey()));
                         roads = Mvt.roads(tile, Z, Integer.parseInt(zxy[1]), Integer.parseInt(zxy[2]));
                         fetched++;
                         synchronized (CACHE) {
@@ -84,11 +84,13 @@ final class Roads {
                 }
                 for (Mvt.Road r : roads) out.add(new Line(r.level, r.lat, r.lon));
             }
-            rebase(out, route);
             Log.i("BeelineNav", "roads: " + out.size() + " lines from " + finalWanted.size()
                     + " tiles (" + fetched + " fetched)" + (error == null ? "" : ", last error: " + error));
             final String err = error;
-            MAIN.post(() -> cb.done(out, err));
+            MAIN.post(() -> {
+                rebase(out, route);   // on the main thread, where the route's origin is moved too
+                cb.done(out, err);
+            });
         }).start();
     }
 

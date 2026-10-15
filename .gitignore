@@ -3,6 +3,16 @@ ola_key.txt
 *_key.txt
 *.keystore
 *.jks
+*.key
+*.pem
+*api_key*
+*apikey*
+*_token*
+.env
+.env.*
+secrets.*
+keys/
+google-services.json
 
 # Build output (rebuild with ./build.sh)
 build/
@@ -18,3 +28,9 @@ local.properties
 .DS_Store
 Thumbs.db
 *.log
+
+# Claude Code files
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json

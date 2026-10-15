@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Route</title>
+<style>
+html, body, #map { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+body.light, body.light #map { background: #ededed; }
+#close {
+  position: absolute; top: 12px; left: 12px; z-index: 5;
+  width: 40px; height: 40px; line-height: 40px; text-align: center;
+  background: #161616; color: #fff; border-radius: 50%;
+  font: bold 18px sans-serif; box-shadow: 0 2px 8px rgba(0,0,0,.35);
+}
+body.light #close { background: #fff; color: #111; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+#msg {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; padding: 8px 12px;
+  background: rgba(0,0,0,.7); color: #999; font: 12px sans-serif; display: none;
+}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="close" onclick="Android.close()">&#x2715;</div>
+<div id="msg"></div>
+<script>
+var D = __DATA__;
+if (D.light) document.body.className = 'light';
+var msg = document.getElementById('msg');
+function say(t) { msg.textContent = t; msg.style.display = t ? 'block' : 'none'; }
+// Google calls this when the key is refused (wrong key, API not enabled, or a website restriction).
+window.gm_authFailure = function () {
+  say('Google Maps rejected the key. Enable the Maps JavaScript API for it and remove any website restriction.');
+};
+function init() {
+  var dark = [
+    { elementType: 'geometry', stylers: [{ color: '#1c1c1c' }] },
+    { elementType: 'labels.text.fill', stylers: [{ color: '#9a9a9a' }] },
+    { elementType: 'labels.text.stroke', stylers: [{ color: '#1c1c1c' }] },
+    { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#383838' }] },
+    { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#2a2a2a' }] },
+    { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0f1a26' }] },
+    { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+    { featureType: 'transit', stylers: [{ visibility: 'off' }] }
+  ];
+  var line = (D.route || []).map(function (p) { return { lat: p[1], lng: p[0] }; });   // GeoJSON order in, lat/lng out
+  var me = D.me ? { lat: D.me[1], lng: D.me[0] } : null;
+  var map = new google.maps.Map(document.getElementById('map'), {
+    center: me || (line.length ? line[0] : { lat: 0, lng: 0 }),
+    zoom: 15, disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy',
+    styles: D.light ? [] : dark
+  });
+  if (line.length >= 2) {
+    new google.maps.Polyline({ path: line, strokeColor: D.light ? '#fff' : '#000', strokeWeight: 9, map: map });
+    new google.maps.Polyline({ path: line, strokeColor: D.light ? '#111' : '#fff', strokeWeight: 5, map: map });
+    new google.maps.Marker({ position: line[line.length - 1], map: map });
+    var b = new google.maps.LatLngBounds();
+    line.forEach(function (p) { b.extend(p); });
+    if (me) b.extend(me);
+    map.fitBounds(b, 60);
+  }
+  if (me) {
+    new google.maps.Marker({ position: me, map: map, icon: {
+      path: google.maps.SymbolPath.CIRCLE, scale: 8, fillOpacity: 1,
+      fillColor: D.light ? '#111' : '#fff', strokeColor: D.light ? '#fff' : '#111', strokeWeight: 3 } });
+  }
+}
+</script>
+<script async defer src="https://maps.googleapis.com/maps/api/js?key=__KEY__&callback=init&v=weekly"
+        onerror="say('Map library failed to load. Is there a network?')"></script>
+</body>
+</html>

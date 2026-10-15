@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.View;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
@@ -19,7 +20,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * Full-screen zoomable map (MapLibre in a WebView, Ola Maps tiles) with the route drawn on it.
+ * Full-screen zoomable map with the route drawn on it: MapLibre with Ola Maps tiles, or the Google Maps
+ * JavaScript API when Google is the service in use.
  * Opened from the map picture; loads many tiles, so only on request.
  */
 public final class MapActivity extends Activity {
@@ -27,24 +29,28 @@ public final class MapActivity extends Activity {
     private WebView web;
 
     /** route is {lat, lon} points; me is the rider's {lat, lon} or null. */
-    static Intent intent(Context ctx, double[][] route, double[] me) {
+    static Intent intent(Context ctx, double[][] route, double[] me, boolean light) {
         double[] flat = new double[route.length * 2];
         for (int i = 0; i < route.length; i++) {
             flat[2 * i] = route[i][0];
             flat[2 * i + 1] = route[i][1];
         }
-        return new Intent(ctx, MapActivity.class).putExtra("route", flat).putExtra("me", me);
+        return new Intent(ctx, MapActivity.class).putExtra("route", flat).putExtra("me", me).putExtra("light", light);
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        getWindow().setStatusBarColor(Color.BLACK);
-        getWindow().setNavigationBarColor(Color.BLACK);
+        boolean light = getIntent().getBooleanExtra("light", false);
+        int bg = light ? Color.WHITE : Color.BLACK;
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        getWindow().getDecorView().setSystemUiVisibility(light
+                ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR : 0);
 
         web = new WebView(this);
-        web.setBackgroundColor(Color.BLACK);
+        web.setBackgroundColor(bg);
         web.getSettings().setJavaScriptEnabled(true);
         web.getSettings().setDomStorageEnabled(true);
         web.setWebChromeClient(new WebChromeClient() {
@@ -64,10 +70,16 @@ public final class MapActivity extends Activity {
 
         String html;
         try {
-            html = asset("map.html")
-                    .replace("__DATA__", pageData())
-                    .replace("/*CSS*/", asset("maplibre-gl.css"))
-                    .replace("/*JS*/", asset("maplibre-gl.js"));
+            if (Router.GOOGLE.equals(Router.provider())) {
+                html = asset("map_google.html")
+                        .replace("__DATA__", pageData())
+                        .replace("__KEY__", Router.key().replace("\"", "").replace("&", ""));
+            } else {
+                html = asset("map.html")
+                        .replace("__DATA__", pageData())
+                        .replace("/*CSS*/", asset("maplibre-gl.css"))
+                        .replace("/*JS*/", asset("maplibre-gl.js"));
+            }
         } catch (IOException e) {
             html = "<body style='background:#000;color:#888;font-family:sans-serif'>Map files missing</body>";
         }
@@ -79,7 +91,8 @@ public final class MapActivity extends Activity {
     private String pageData() {
         double[] route = getIntent().getDoubleArrayExtra("route");
         double[] me = getIntent().getDoubleArrayExtra("me");
-        StringBuilder b = new StringBuilder("{\"key\":\"").append(Router.key().replace("\"", "")).append("\",\"route\":[");
+        StringBuilder b = new StringBuilder("{\"key\":\"").append(Router.key().replace("\"", ""))
+                .append("\",\"light\":").append(getIntent().getBooleanExtra("light", false)).append(",\"route\":[");
         for (int i = 0; route != null && i + 1 < route.length; i += 2) {
             if (i > 0) b.append(',');
             b.append(String.format(Locale.US, "[%.6f,%.6f]", route[i + 1], route[i]));   // GeoJSON order: lon, lat

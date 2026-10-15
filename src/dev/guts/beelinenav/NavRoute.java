@@ -7,6 +7,8 @@ import org.json.JSONObject;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** A route as a simplified polyline plus its turns, in metres east/north of a movable origin. */
 final class NavRoute {
@@ -14,6 +16,7 @@ final class NavRoute {
     private static final int WINDOW = 48; // most points the display accepts in one route packet
     private static final double M_LAT = 110540, M_LON = 111320;
     private static final double TURN_SPAN_M = 20;   // how far either side of a turn its angle is measured
+    private static final double WRONG_WAY_M = 40;   // a stretch running against the heading counts this much further away
 
     final String name;
     final double destLat, destLon;
@@ -21,6 +24,7 @@ final class NavRoute {
     private final double[] lat, lon;
     private final double[] x, y, cum;
     private final int[] manIdx, manAngle;
+    private final String[] manName;   // the road each turn leads onto; the destination's name for the arrival
     private double lat0, lon0, cos0;
 
     int durationS;       // the service's time estimate for the whole route, seconds
@@ -29,9 +33,10 @@ final class NavRoute {
     double offRoute;     // metres between the rider and the line
     int turnAngle;       // next turn, degrees, + = right, or ARRIVE
     double distToTurn;   // metres to that turn
+    String turnName = ""; // the road after that turn ("" when unknown), or the destination when arriving
 
     private NavRoute(String name, double destLat, double destLon,
-                     ArrayList<double[]> pts, ArrayList<int[]> mans) {
+                     ArrayList<double[]> pts, ArrayList<int[]> mans, ArrayList<String> names) {
         this.name = name;
         this.destLat = destLat;
         this.destLon = destLon;
@@ -47,6 +52,7 @@ final class NavRoute {
         }
         manIdx = new int[mans.size()];
         manAngle = new int[mans.size()];
+        manName = names.toArray(new String[0]);
         for (int i = 0; i < mans.size(); i++) {
             manIdx[i] = mans.get(i)[0];
             manAngle[i] = mans.get(i)[1];
@@ -61,6 +67,7 @@ final class NavRoute {
                 .getJSONArray("legs").getJSONObject(0).getJSONArray("steps");
         ArrayList<double[]> pts = new ArrayList<>();   // {lat, lon}
         ArrayList<int[]> mans = new ArrayList<>();     // {point index, angle}
+        ArrayList<String> names = new ArrayList<>();   // the road each turn leads onto
 
         for (int s = 0; s < steps.length(); s++) {
             JSONObject step = steps.getJSONObject(s);
@@ -86,13 +93,17 @@ final class NavRoute {
             if (type.equals("depart")) continue;
             if (type.equals("arrive")) {
                 mans.add(new int[]{first, ARRIVE});
+                names.add(name);
                 continue;
             }
             double a = norm180(m.optDouble("bearing_after", 0) - m.optDouble("bearing_before", 0));
-            if (Math.abs(a) >= 20) mans.add(new int[]{first, (int) Math.round(a)});
+            if (Math.abs(a) >= 20) {
+                mans.add(new int[]{first, (int) Math.round(a)});
+                names.add(roadName(step.optString("name"), step.optString("ref")));
+            }
         }
         if (pts.size() < 2) throw new JSONException("Route is too short");
-        NavRoute r = new NavRoute(name, destLat, destLon, pts, mans);
+        NavRoute r = new NavRoute(name, destLat, destLon, pts, mans, names);
         r.durationS = (int) root.getJSONArray("routes").getJSONObject(0).optDouble("duration", 0);
         return r;
     }
@@ -115,6 +126,7 @@ final class NavRoute {
         if (line.length > 0 && Math.abs(line[0][0]) > 90) line = decodePolyline(enc, 1e6);
 
         ArrayList<double[]> turns = new ArrayList<>();
+        ArrayList<String> roads = new ArrayList<>();   // "Turn left onto Kasturba Road" -> Kasturba Road
         JSONArray legs = route.optJSONArray("legs");
         int duration = 0;
         for (int l = 0; legs != null && l < legs.length(); l++) {
@@ -128,10 +140,57 @@ final class NavRoute {
                 if (at == null || man.equals("depart") || man.equals("continue") || man.equals("arrive")) continue;
                 double side = man.contains("left") ? -1 : man.contains("right") ? 1 : 0;
                 turns.add(new double[]{at.optDouble("lat"), at.optDouble("lng"), side});
+                roads.add(roadFromInstruction(step.optString("instructions")));
             }
         }
-        NavRoute r = fromLine(line, turns.toArray(new double[0][]), name, destLat, destLon);
+        NavRoute r = fromLine(line, turns.toArray(new double[0][]), roads.toArray(new String[0]), name, destLat, destLon);
         r.durationS = duration;
+        return r;
+    }
+
+    /**
+     * Google Routes API (computeRoutes) response: one route with an encoded polyline and steps that
+     * carry a maneuver ("TURN_LEFT") and a spoken-style instruction naming the road.
+     */
+    static NavRoute fromGoogle(JSONObject root, String name, double destLat, double destLon)
+            throws JSONException {
+        JSONArray routes = root.optJSONArray("routes");
+        if (routes == null || routes.length() == 0) {
+            JSONObject err = root.optJSONObject("error");
+            throw new JSONException(err == null ? "No route found" : err.optString("message", "No route found"));
+        }
+        JSONObject route = routes.getJSONObject(0);
+        JSONObject pl = route.optJSONObject("polyline");
+        String enc = pl == null ? "" : pl.optString("encodedPolyline");
+        if (enc.isEmpty()) throw new JSONException("No route line in the response");
+        double[][] line = decodePolyline(enc, 1e5);
+
+        ArrayList<double[]> turns = new ArrayList<>();
+        ArrayList<String> roads = new ArrayList<>();
+        JSONArray legs = route.optJSONArray("legs");
+        for (int l = 0; legs != null && l < legs.length(); l++) {
+            JSONArray steps = legs.getJSONObject(l).optJSONArray("steps");
+            for (int s = 0; steps != null && s < steps.length(); s++) {
+                JSONObject step = steps.getJSONObject(s);
+                JSONObject nav = step.optJSONObject("navigationInstruction");
+                JSONObject at = step.optJSONObject("startLocation");
+                at = at == null ? null : at.optJSONObject("latLng");
+                String man = nav == null ? "" : nav.optString("maneuver");
+                // the start, a road-name change and "straight" are not turns; the line's last point is the arrival
+                if (at == null || man.isEmpty() || man.equals("DEPART") || man.equals("NAME_CHANGE")
+                        || man.equals("STRAIGHT") || man.equals("MANEUVER_UNSPECIFIED")) continue;
+                double side = man.contains("LEFT") ? -1 : man.contains("RIGHT") ? 1 : 0;
+                turns.add(new double[]{at.optDouble("latitude"), at.optDouble("longitude"), side});
+                roads.add(roadFromInstruction(nav.optString("instructions")));
+            }
+        }
+        NavRoute r = fromLine(line, turns.toArray(new double[0][]), roads.toArray(new String[0]), name, destLat, destLon);
+        String dur = route.optString("duration", "0s").replace("s", "");   // "1234s"
+        try {
+            r.durationS = (int) Math.round(Double.parseDouble(dur));
+        } catch (NumberFormatException ignored) {
+            r.durationS = 0;
+        }
         return r;
     }
 
@@ -139,8 +198,9 @@ final class NavRoute {
      * Builds a route from a full-resolution line of {lat, lon} points and the turn points
      * {lat, lon, side}. Turn angles are measured from the line itself; side (-1 left, +1 right,
      * 0 unknown) only decides the icon for turns too gentle to measure, like "keep right".
+     * turnRoads names the road each turn point leads onto (same order; may be null).
      */
-    static NavRoute fromLine(double[][] line, double[][] turnPoints, String name,
+    static NavRoute fromLine(double[][] line, double[][] turnPoints, String[] turnRoads, String name,
                              double destLat, double destLon) throws JSONException {
         int n = line.length;
         if (n < 2) throw new JSONException("Route is too short");
@@ -154,9 +214,11 @@ final class NavRoute {
         // Nearest vertex for each turn point, never going backwards along the line
         boolean[] cut = new boolean[n];
         double[] side = new double[n];
+        String[] road = new String[n];
         cut[0] = cut[n - 1] = true;
         int from = 0;
-        for (double[] t : turnPoints) {
+        for (int k = 0; k < turnPoints.length; k++) {
+            double[] t = turnPoints[k];
             double tx = (t[1] - line[0][1]) * M_LON * c, ty = (t[0] - line[0][0]) * M_LAT;
             double best = Double.MAX_VALUE;
             int at = from;
@@ -170,11 +232,13 @@ final class NavRoute {
             if (best > 50) continue;        // step point is nowhere near the line; ignore it
             cut[at] = true;
             side[at] = t.length > 2 ? t[2] : 0;
+            road[at] = turnRoads != null && k < turnRoads.length && turnRoads[k] != null ? turnRoads[k] : "";
             from = at;
         }
 
         ArrayList<double[]> pts = new ArrayList<>();
         ArrayList<int[]> mans = new ArrayList<>();
+        ArrayList<String> names = new ArrayList<>();
         int start = 0;
         for (int end = 1; end < n; end++) {
             if (!cut[end]) continue;
@@ -188,13 +252,48 @@ final class NavRoute {
             if (end < n - 1) {
                 double a = norm180(bearingAlong(px, py, end, TURN_SPAN_M) - bearingAlong(px, py, end, -TURN_SPAN_M));
                 if (Math.abs(a) < 20) a = side[end] * 25;
-                if (a != 0) mans.add(new int[]{pts.size() - 1, (int) Math.round(a)});
+                if (a != 0) {
+                    mans.add(new int[]{pts.size() - 1, (int) Math.round(a)});
+                    names.add(road[end] == null ? "" : road[end]);
+                }
             }
             start = end;
         }
         if (pts.size() < 2) throw new JSONException("Route is too short");
         mans.add(new int[]{pts.size() - 1, ARRIVE});
-        return new NavRoute(name, destLat, destLon, pts, mans);
+        names.add(name);
+        return new NavRoute(name, destLat, destLon, pts, mans, names);
+    }
+
+    /** The road an OSRM step runs along: its name, else its number ("NH 44"), else nothing. */
+    private static String roadName(String name, String ref) {
+        if (name != null && !name.isEmpty()) return name;
+        return ref == null ? "" : ref;
+    }
+
+    private static final Pattern ONTO = Pattern.compile("\\b(?:onto|on|towards?)\\s+(.+)$");
+
+    /** The road named in a spoken-style instruction: "Turn left onto Kasturba Road" gives "Kasturba Road". */
+    static String roadFromInstruction(String instruction) {
+        if (instruction == null) return "";
+        Matcher m = ONTO.matcher(instruction.replaceAll("<[^>]+>", ""));
+        if (!m.find()) return "";
+        String road = m.group(1).replaceAll("\\s+(?:toward|towards|for|and)\\b.*$", "").replaceAll("[.,;:]+$", "").trim();
+        return road.matches("(?i)the (left|right)\\b.*") ? "" : road;   // "arrived ..., on the left" names no road
+    }
+
+    /** A road name that fits the display's 24 characters: the usual abbreviations when it is too long. */
+    static String shortRoad(String road) {
+        if (road.length() <= 24) return road;
+        return road.replaceAll("\\bMahatma Gandhi\\b", "MG").replaceAll("\\bNational Highway\\b", "NH")
+                .replaceAll("\\bRoad\\b", "Rd").replaceAll("\\bStreet\\b", "St").replaceAll("\\bAvenue\\b", "Ave")
+                .replaceAll("\\bBoulevard\\b", "Blvd").replaceAll("\\bHighway\\b", "Hwy").replaceAll("\\bCross\\b", "Cr")
+                .replaceAll("\\bExtension\\b", "Ext").replaceAll("\\bJunction\\b", "Jn").replaceAll("\\bDoctor\\b", "Dr");
+    }
+
+    /** "onto Kasturba Road" for a turn with a known road; nothing for the arrival or an unnamed road. */
+    static String ontoText(int angle, String road) {
+        return angle == ARRIVE || road == null || road.isEmpty() ? "" : "onto " + road;
     }
 
     /** Bearing of travel just after vertex i (span > 0) or just before it (span < 0), in degrees. */
@@ -252,38 +351,49 @@ final class NavRoute {
     double toX(double lonDeg) { return (lonDeg - lon0) * M_LON * cos0; }
     double toY(double latDeg) { return (latDeg - lat0) * M_LAT; }
 
-    /** Snaps the rider to the line, looking near the previous segment first. */
-    void snap(double px, double py) {
-        double best = search(px, py, Math.max(0, seg - 3), Math.min(n - 2, seg + 40));
-        if (best > 60) best = search(px, py, 0, n - 2);
+    /**
+     * Snaps the rider to the line, looking near the previous segment first. When the heading is known,
+     * a stretch running the other way (the return leg of an out-and-back route, the far side of a loop)
+     * only wins if it is clearly closer, so the rider is not shown on the wrong leg of the route.
+     */
+    void snap(double px, double py, double headingDeg, boolean useHeading) {
+        double hx = useHeading ? Math.sin(Math.toRadians(headingDeg)) : 0;
+        double hy = useHeading ? Math.cos(Math.toRadians(headingDeg)) : 0;
+        double best = search(px, py, Math.max(0, seg - 3), Math.min(n - 2, seg + 40), hx, hy);
+        if (best > 60) best = search(px, py, 0, n - 2, hx, hy);
         offRoute = best;
 
         turnAngle = ARRIVE;
+        turnName = name;
         distToTurn = Math.max(0, cum[n - 1] - progress);
         for (int k = 0; k < manIdx.length; k++) {
             double at = cum[manIdx[k]];
             if (at > progress + 3) {
                 turnAngle = manAngle[k];
+                turnName = manName[k];
                 distToTurn = at - progress;
                 break;
             }
         }
     }
 
-    private double search(double px, double py, int lo, int hi) {
-        double best = Double.MAX_VALUE;
+    /** Picks the segment in lo..hi nearest the rider (penalising ones that run against the unit heading hx,hy) and returns its distance. */
+    private double search(double px, double py, int lo, int hi, double hx, double hy) {
+        double best = Double.MAX_VALUE, bestDist = Double.MAX_VALUE;
         for (int i = lo; i <= hi; i++) {
             double vx = x[i + 1] - x[i], vy = y[i + 1] - y[i], len2 = vx * vx + vy * vy;
             double t = len2 > 0 ? ((px - x[i]) * vx + (py - y[i]) * vy) / len2 : 0;
             t = Math.max(0, Math.min(1, t));
             double d = Math.hypot(x[i] + vx * t - px, y[i] + vy * t - py);
-            if (d < best) {
-                best = d;
+            double score = vx * hx + vy * hy < 0 ? d + WRONG_WAY_M : d;   // more than 90 degrees off our heading
+            if (score < best) {
+                best = score;
+                bestDist = d;
                 seg = i;
                 progress = cum[i] + t * Math.sqrt(len2);
             }
         }
-        return best;
+        return bestDist;
     }
 
     double remaining() { return Math.max(0, cum[n - 1] - progress); }
@@ -305,6 +415,23 @@ final class NavRoute {
     int remainingTimeS() {
         double total = totalM();
         return total <= 0 ? 0 : (int) Math.round(durationS * remaining() / total);
+    }
+
+    /** "Turn right", "Arrive", ... for a turn angle, as the app and the notification say it. */
+    static String turnText(int a) {
+        if (a == ARRIVE) return "Arrive";
+        String side = a > 0 ? "right" : "left";
+        int m = Math.abs(a);
+        if (m > 150) return "U-turn";
+        if (m > 110) return "Sharp " + side;
+        if (m < 45) return "Slight " + side;
+        return "Turn " + side;
+    }
+
+    /** Metres rounded to 10, or kilometres with one decimal. */
+    static String distText(double m) {
+        if (m < 1000) return Math.round(m / 10) * 10 + " m";
+        return String.format(java.util.Locale.US, "%.1f km", m / 1000);
     }
 
     /** The line from a segment onward as {lat, lon}, thinned evenly to at most maxPoints, for drawing on a map. */

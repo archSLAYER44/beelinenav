@@ -42,8 +42,16 @@ public final class NavService extends Service implements LocationListener, Ble.L
     static NavService instance;
     static Listener ui;
 
-    private static final double OFF_ROUTE_M = 50, REBASE_M = 20000;
+    static final double OFF_ROUTE_M = 50;                // further than this from the line counts as off route
+    private static final double REBASE_M = 20000;
+    private static final double ARRIVE_M = 30;           // this close to the end of the line (or the pin) is "arrived"
+    private static final double ROUGH_FIX_M = 100;       // a fix this uncertain is kept off the display while navigating
     private static final long REROUTE_GAP_MS = 15000;
+    private static final long GPS_HOLD_MS = 60000;       // network fixes are ignored this long after the last GPS fix
+    private static final long ROUTE_REFRESH_MS = 10000;  // the route is re-sent this often even when nothing changed
+    private static final long ARRIVED_MSG_MS = 15000;    // "Arrived at ..." stays in the app this long
+    private static final long TRIP_KEEP_MS = 6 * 3600 * 1000L;   // an unfinished trip older than this is not resumed
+    private static final String IDLE_TEXT = "Sending speed and directions to the display";
 
     Ble ble;
     NavRoute route;
@@ -58,21 +66,25 @@ public final class NavService extends Service implements LocationListener, Ble.L
     private double destLat, destLon;
     private float heading;
     private boolean haveHeading;
-    private int offCount, sentSeg = -1;
-    private long lastRouteRequest, lastGpsMs = -100000;
+    private int offCount, arriveCount, sentSeg = -1;
+    private String sentTurn;                 // the road sign the display has
+    private long lastRouteRequest, lastGpsMs = -100000, routeSentMs;
     private BroadcastReceiver callRx;
     private List<Roads.Line> roads;          // side roads around the route, for the junction view
     private int roadsSeg = -1;
     private double roadsProgress = -1e9;
     private final Handler timer = new Handler(Looper.getMainLooper());
+    private NotificationManager nm;
+    private String shownNote = "";           // the notification's current text
 
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
-        Router.loadKey(this);
+        Router.load(this);
         Theme.load(this);
         goForeground();
+        resumeTrip();
         ble = new Ble(this, this);
         ble.start();
         // GPS alone can take minutes for a first fix, so start from the last known position
@@ -104,6 +116,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         ble.stop();
         timer.removeCallbacksAndMessages(null);
         if (callRx != null) unregisterReceiver(callRx);
+        clearTrip();                         // a deliberate stop; only a kill leaves the trip behind to resume
         instance = null;
         super.onDestroy();
     }
@@ -130,11 +143,15 @@ public final class NavService extends Service implements LocationListener, Ble.L
         destLat = r.destLat;
         destLon = r.destLon;
         destName = r.name;
+        saveTrip();
         route = r;
         loadRoads(r);
         sentSeg = -1;
+        sentTurn = null;
         offCount = 0;
+        arriveCount = 0;
         message = "";
+        timer.removeCallbacks(clearMessage);
         lastRouteRequest = SystemClock.elapsedRealtime();
         if (last != null) tick();
         notifyUi();
@@ -143,8 +160,10 @@ public final class NavService extends Service implements LocationListener, Ble.L
     void stopNav() {
         hasDest = false;
         route = null;
+        clearTrip();
         clearRoads();
         message = "";
+        timer.removeCallbacks(clearMessage);
         ble.sendRoute(new byte[]{0});
         if (last != null) tick();
         notifyUi();
@@ -156,7 +175,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     public void onLocationChanged(Location loc) {
         long now = SystemClock.elapsedRealtime();
         if (LocationManager.GPS_PROVIDER.equals(loc.getProvider())) lastGpsMs = now;
-        else if (now - lastGpsMs < 10000) return;   // GPS is live; ignore the rougher network fix
+        else if (now - lastGpsMs < GPS_HOLD_MS) return;   // GPS was live a moment ago; a network fix would only jump around
         last = loc;
         speed = loc.hasSpeed() ? loc.getSpeed() : 0;
         if (loc.hasBearing() && speed > 1.0f) {     // GPS bearing is noise when standing still
@@ -177,9 +196,13 @@ public final class NavService extends Service implements LocationListener, Ble.L
         day = Theme.isLight(last);
         NavRoute r = route;
         if (r == null) {
-            ble.sendPose(pose(0, 0, heading, speed, 0, 0, day, 0xFFFF));   // display shows clock and speed
+            ble.sendPose(pose(0, 0, heading, speed, 0, 0, day, false, 0xFFFF));   // display shows clock and speed
             return;
         }
+        // A rough fix (cell tower, first GPS fix) can be hundreds of metres out and would put the rider on
+        // the wrong road. The display keeps the last good position and greys its arrow until GPS is back.
+        if (last.hasAccuracy() && last.getAccuracy() > ROUGH_FIX_M) return;
+
         double px = r.toX(last.getLongitude()), py = r.toY(last.getLatitude());
         if (Math.hypot(px, py) > REBASE_M) {
             r.setOrigin(last.getLatitude(), last.getLongitude());
@@ -188,19 +211,64 @@ public final class NavService extends Service implements LocationListener, Ble.L
             if (roads != null) Roads.rebase(roads, r);
             roadsSeg = -1;
         }
-        r.snap(px, py);
+        r.snap(px, py, heading, haveHeading && speed > 1.0f);
         if (!haveHeading) heading = (float) r.bearing();
-        if (r.seg != sentSeg) {
+
+        // Arrived: at the end of the line, or at the pin itself once the line is nearly done (the pin may
+        // sit off the road). Two fixes in a row, so a single GPS wobble does not end the trip.
+        double toDest = Math.hypot(px - r.toX(destLon), py - r.toY(destLat));
+        boolean there = r.remaining() < ARRIVE_M || (toDest < ARRIVE_M && r.remaining() < 300);
+        arriveCount = there ? arriveCount + 1 : 0;
+        if (arriveCount >= 2) {
+            arrive();
+            return;
+        }
+
+        long now = SystemClock.elapsedRealtime();
+        if (r.seg != sentSeg || now - routeSentMs > ROUTE_REFRESH_MS) {   // the refresh heals a lost packet
             ble.sendRoute(r.routePacket());
             sentSeg = r.seg;
+            routeSentMs = now;
         }
-        if (roads != null && (r.seg != roadsSeg || Math.abs(r.progress - roadsProgress) > 250)) sendRoadsWindow(r, px, py);
+        if (!r.turnName.equals(sentTurn)) {                 // the sign at the top of the display
+            ble.sendTurn(ascii24(NavRoute.shortRoad(r.turnName)));
+            sentTurn = r.turnName;
+        }
         int eta = Math.min(0xFFFE, Math.round(r.remainingTimeS() / 60f));
-        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day, eta));
+        ble.sendPose(pose(px, py, heading, speed, r.distToTurn, r.turnAngle, day, r.offRoute > OFF_ROUTE_M, eta));
+        if (roads != null && (r.seg != roadsSeg || Math.abs(r.progress - roadsProgress) > 250)) sendRoadsWindow(r, px, py);
 
         offCount = r.offRoute > OFF_ROUTE_M ? offCount + 1 : 0;
-        long now = SystemClock.elapsedRealtime();
         if (offCount >= 5 && !routing && now - lastRouteRequest > REROUTE_GAP_MS) requestRoute();
+    }
+
+    /** The rider is there: the display shows "destination reached" for a few seconds, then its clock. */
+    private void arrive() {
+        String name = destName;
+        Log.i("BeelineNav", "arrived at " + name);
+        hasDest = false;
+        route = null;
+        arriveCount = 0;
+        clearTrip();
+        clearRoads();
+        ble.sendRoute(arrivedPacket(name));
+        message = "Arrived at " + name;
+        timer.removeCallbacks(clearMessage);
+        timer.postDelayed(clearMessage, ARRIVED_MSG_MS);
+        if (last != null) tick();
+        notifyUi();
+    }
+
+    private final Runnable clearMessage = () -> {
+        if (!hasDest) {
+            message = "";
+            notifyUi();
+        }
+    };
+
+    /** Seconds since the fix the app is working from; grows when GPS has gone quiet. */
+    long fixAgeS() {
+        return last == null ? 0 : Math.max(0, (System.currentTimeMillis() - last.getTime()) / 1000);
     }
 
     private void requestRoute() {
@@ -215,6 +283,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
                 route = r;
                 loadRoads(r);
                 sentSeg = -1;
+                sentTurn = null;
                 offCount = 0;
                 message = "";
                 tick();
@@ -226,11 +295,31 @@ public final class NavService extends Service implements LocationListener, Ble.L
     }
 
     /**
+     * Route packet with no points, which clears the display's route, then uint8 flags (bit0 = arrived)
+     * and the destination's name in ASCII: the display shows "destination reached" before its clock.
+     */
+    private static byte[] arrivedPacket(String name) {
+        byte[] n = ascii24(name);
+        byte[] out = new byte[2 + n.length];
+        out[0] = 0;
+        out[1] = 1;
+        System.arraycopy(n, 0, out, 2, n.length);
+        return out;
+    }
+
+    /** Up to 24 bytes of printable ASCII, which is all the display's font can show. */
+    private static byte[] ascii24(String s) {
+        String ascii = s.replaceAll("[^\\x20-\\x7E]", "").trim();
+        if (ascii.length() > 24) ascii = ascii.substring(0, 24);
+        return ascii.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /**
      * Pose packet, 19 bytes LE: int32 x, y (dm), uint16 heading (0.01 deg), speed (cm/s), dist (m),
-     * int16 angle, uint8 flags (bit0 = day), uint16 minutes to arrive (0xFFFF = none).
+     * int16 angle, uint8 flags (bit0 = day, bit1 = off route), uint16 minutes to arrive (0xFFFF = none).
      */
     private static byte[] pose(double x, double y, float heading, float speed, double dist, int angle,
-                               boolean day, int etaMin) {
+                               boolean day, boolean offRoute, int etaMin) {
         float h = ((heading % 360) + 360) % 360;
         ByteBuffer b = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN);
         b.putInt((int) Math.round(x * 10));
@@ -239,7 +328,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
         b.putShort((short) Math.min(65535, Math.round(speed * 100)));
         b.putShort((short) Math.min(65535, Math.round(dist)));
         b.putShort((short) angle);
-        b.put((byte) (day ? 1 : 0));
+        b.put((byte) ((day ? 1 : 0) | (offRoute ? 2 : 0)));
         b.putShort((short) etaMin);
         return b.array();
     }
@@ -254,6 +343,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
     @Override
     public void onBleReady() {
         sentSeg = -1;                                  // the display forgets everything on reconnect
+        sentTurn = null;
         roadsSeg = -1;
         ble.sendTime(timePacket());
         if (callState != 0) ble.sendCall(callPacket(callState, callName));
@@ -267,7 +357,8 @@ public final class NavService extends Service implements LocationListener, Ble.L
     private void loadRoads(NavRoute r) {
         roads = null;
         roadsSeg = -1;
-        if (!Router.hasKey()) return;                  // the road shapes come from Ola's tiles
+        ble.sendRoads(Roads.packets(new ArrayList<>()));   // the old route's roads would sit in the wrong place
+        if (!Router.olaTiles()) return;                // the road shapes come from Ola's tiles only
         Roads.load(r, (lines, err) -> {
             if (route != r) return;                    // the route changed while the tiles loaded
             roads = lines;
@@ -378,9 +469,7 @@ public final class NavService extends Service implements LocationListener, Ble.L
 
     /** Call packet: uint8 state (0 none, 1 ringing, 2 in call), then up to 24 ASCII bytes of the caller's name. */
     private static byte[] callPacket(int state, String name) {
-        String ascii = name.replaceAll("[^\\x20-\\x7E]", "").trim();   // the display font is ASCII only
-        if (ascii.length() > 24) ascii = ascii.substring(0, 24);
-        byte[] n = ascii.getBytes(StandardCharsets.US_ASCII);
+        byte[] n = ascii24(name);
         byte[] out = new byte[1 + n.length];
         out[0] = (byte) state;
         System.arraycopy(n, 0, out, 1, n.length);
@@ -388,26 +477,87 @@ public final class NavService extends Service implements LocationListener, Ble.L
     }
 
     private void notifyUi() {
+        updateNote();
         if (ui != null) ui.onNavState();
     }
 
+    // ---------- notification ----------
+
     private void goForeground() {
-        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         nm.createNotificationChannel(new NotificationChannel("nav", "Navigation", NotificationManager.IMPORTANCE_LOW));
-        PendingIntent open = PendingIntent.getActivity(this, 0,
-                new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        Notification n = new Notification.Builder(this, "nav")
-                .setContentTitle("BeeNav")
-                .setContentText("Sending speed and directions to the display")
-                .setSmallIcon(R.drawable.ic_stat)
-                .setContentIntent(open)
-                .setOngoing(true)
-                .build();
+        shownNote = IDLE_TEXT;
+        Notification n = note(IDLE_TEXT);
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                     | ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         } else {
             startForeground(1, n);
         }
+    }
+
+    private Notification note(String text) {
+        PendingIntent open = PendingIntent.getActivity(this, 0,
+                new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        return new Notification.Builder(this, "nav")
+                .setContentTitle("BeeNav")
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentIntent(open)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+    }
+
+    /** The notification follows the ride: next turn and time left, or what the app is waiting for. */
+    private void updateNote() {
+        if (nm == null) return;
+        NavRoute r = route;
+        String text;
+        if (r != null) {
+            int min = Math.max(1, Math.round(r.remainingTimeS() / 60f));
+            String onto = r.offRoute > OFF_ROUTE_M ? "off route" : NavRoute.ontoText(r.turnAngle, r.turnName);
+            text = NavRoute.turnText(r.turnAngle) + " in " + NavRoute.distText(r.distToTurn)
+                    + (onto.isEmpty() ? "" : "  ·  " + onto) + "  ·  " + min + " min to " + destName;
+        } else if (hasDest) {
+            text = message.isEmpty() ? "Finding route to " + destName : message;
+        } else {
+            text = message.isEmpty() ? IDLE_TEXT : message;
+        }
+        if (text.equals(shownNote)) return;
+        shownNote = text;
+        nm.notify(1, note(text));
+    }
+
+    // ---------- the trip survives Android killing the app ----------
+
+    private void saveTrip() {
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putString("trip", destLat + "," + destLon + "," + System.currentTimeMillis() + "," + destName).apply();
+    }
+
+    private void clearTrip() {
+        getSharedPreferences("settings", MODE_PRIVATE).edit().remove("trip").apply();
+    }
+
+    /** Started again after Android killed the service mid-ride: carry on to the same destination. */
+    private void resumeTrip() {
+        String t = getSharedPreferences("settings", MODE_PRIVATE).getString("trip", null);
+        if (t == null) return;
+        String[] f = t.split(",", 4);        // the name comes last, so its own commas are safe
+        try {
+            if (f.length == 4 && System.currentTimeMillis() - Long.parseLong(f[2]) < TRIP_KEEP_MS) {
+                destLat = Double.parseDouble(f[0]);
+                destLon = Double.parseDouble(f[1]);
+                destName = f[3];
+                hasDest = true;
+                message = "Finding route";   // the first fix asks for the route
+                Log.i("BeelineNav", "resuming the trip to " + destName);
+                return;
+            }
+        } catch (NumberFormatException ignored) {
+            // a damaged entry: forget it
+        }
+        clearTrip();
     }
 }
