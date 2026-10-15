@@ -820,7 +820,7 @@ public final class MainActivity extends CardActivity implements NavService.Liste
         arriveText = value();
         tripStats.addView(stat("Arrive", arriveText, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
         timeLeftText = value();
-        tripStats.addView(stat("Time left", timeLeftText, grey, Gravity.START), new LinearLayout.LayoutParams(0, -2, 1));
+        tripStats.addView(stat("Time left", timeLeftText, grey, Gravity.CENTER_HORIZONTAL), new LinearLayout.LayoutParams(0, -2, 1));
         leftText = value();
         tripStats.addView(stat("Distance", leftText, grey, Gravity.END), new LinearLayout.LayoutParams(0, -2, 1));
         tripCard.addView(tripStats, new LinearLayout.LayoutParams(-1, -2));
